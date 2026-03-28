@@ -31,6 +31,16 @@ _twilio = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _normalize_phone(phone: str) -> str:
+    """Normalize phone number to E.164 format (+1XXXXXXXXXX) for Twilio."""
+    digits = ''.join(c for c in phone if c.isdigit())
+    if len(digits) == 10:
+        return f"+1{digits}"
+    elif len(digits) == 11 and digits.startswith('1'):
+        return f"+{digits}"
+    return phone  # return as-is if we can't parse it
+
+
 def _fmt_slot(slot) -> str:
     if not slot:
         return "TBD"
@@ -41,6 +51,7 @@ def _fmt_slot(slot) -> str:
 
 def _send_sms_sync(to: str, body: str) -> str:
     """Blocking SMS send; returns message SID."""
+    to = _normalize_phone(to)
     msg = _twilio.messages.create(body=body, from_=TWILIO_PHONE, to=to)
     logger.info(f"SMS sent to {to}: SID={msg.sid}")
     return msg.sid
