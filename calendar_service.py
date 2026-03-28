@@ -25,6 +25,22 @@ TIMEZONE = "America/New_York"
 TOKEN_FILE = "token.json"
 CREDENTIALS_FILE = "credentials.json"
 
+import base64
+import tempfile
+
+def _write_google_files_from_env():
+    """If Google credentials are stored as base64 env vars, write them to temp files."""
+    creds_b64 = os.getenv("GOOGLE_CREDENTIALS_B64")
+    token_b64 = os.getenv("GOOGLE_TOKEN_B64")
+    if creds_b64 and not os.path.exists(CREDENTIALS_FILE):
+        with open(CREDENTIALS_FILE, "w") as f:
+            f.write(base64.b64decode(creds_b64).decode())
+        logger.info("Wrote credentials.json from GOOGLE_CREDENTIALS_B64")
+    if token_b64 and not os.path.exists(TOKEN_FILE):
+        with open(TOKEN_FILE, "w") as f:
+            f.write(base64.b64decode(token_b64).decode())
+        logger.info("Wrote token.json from GOOGLE_TOKEN_B64")
+
 # Business hours: weekday index → (open_hour, close_hour) or None if closed
 BUSINESS_HOURS = {
     0: (8, 18),   # Monday
@@ -41,6 +57,7 @@ class GoogleCalendarService:
     """Wraps Google Calendar API with business-hours slot logic."""
 
     def __init__(self):
+        _write_google_files_from_env()
         self._service = self._build_service()
 
     def _build_service(self):
