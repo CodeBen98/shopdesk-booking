@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_PHONE = os.getenv("TWILIO_PHONE_NUMBER", "")
-OWNER_PHONE = os.getenv("SHOP_PHONE", "(407) 555-0123")
+OWNER_PHONE = os.getenv("OWNER_PHONE", os.getenv("SHOP_PHONE", "(407) 555-0123"))
 SHOP_NAME = os.getenv("SHOP_NAME", "Mike's Auto Repair")
 
 _twilio = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
