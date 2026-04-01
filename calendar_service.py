@@ -10,6 +10,7 @@ import logging
 import asyncio
 from datetime import datetime, timedelta, time
 from typing import List, Optional
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 
@@ -42,15 +43,18 @@ def _write_google_files_from_env():
         logger.info("Wrote token.json from GOOGLE_TOKEN_B64")
 
 # Business hours: weekday index → (open_hour, close_hour) or None if closed
+# 535 Auto Care: Mon-Fri 9am-5pm, closed weekends
 BUSINESS_HOURS = {
-    0: (8, 18),   # Monday
-    1: (8, 18),   # Tuesday
-    2: (8, 18),   # Wednesday
-    3: (8, 18),   # Thursday
-    4: (8, 18),   # Friday
-    5: (9, 15),   # Saturday
+    0: (9, 17),   # Monday
+    1: (9, 17),   # Tuesday
+    2: (9, 17),   # Wednesday
+    3: (9, 17),   # Thursday
+    4: (9, 17),   # Friday
+    5: None,      # Saturday — closed
     6: None,      # Sunday — closed
 }
+
+SHOP_TIMEZONE = ZoneInfo(TIMEZONE)
 
 
 class GoogleCalendarService:
@@ -233,14 +237,20 @@ class GoogleCalendarService:
         slot_datetime: Optional[datetime],
     ) -> str:
         """Create calendar event; return event URL or fallback confirmation string."""
+        tz = ZoneInfo(TIMEZONE)
+
         if not slot_datetime:
-            slot_datetime = datetime.now() + timedelta(days=1, hours=10)
+            slot_datetime = datetime.now(tz) + timedelta(days=1, hours=10)
             slot_datetime = slot_datetime.replace(minute=0, second=0, microsecond=0)
+
+        # Make timezone-aware if naive (parsed datetime has no tz info)
+        if slot_datetime.tzinfo is None:
+            slot_datetime = slot_datetime.replace(tzinfo=tz)
 
         slot_end = slot_datetime + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
         event_body = {
-            "summary": f"Auto Repair — {name} — {vehicle}",
+            "summary": f"ShopDesk: {issue} — {name} ({vehicle})",
             "description": (
                 f"Customer: {name}\n"
                 f"Phone: {phone}\n"
