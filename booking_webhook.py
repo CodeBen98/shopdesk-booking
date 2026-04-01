@@ -213,8 +213,8 @@ async def vapi_book_appointment(payload: dict):
     })
 
 
-@app.get("/slots")
-async def get_slots():
+@app.api_route("/slots", methods=["GET", "POST"])
+async def get_slots(request=None):
     """
     Called by ElevenLabs to get available appointment slots.
     Returns the next 6 available slots as human-readable strings.
