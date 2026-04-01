@@ -278,24 +278,37 @@ async def health():
 
 
 def _parse_appointment_time(time_str: str) -> Optional[datetime]:
-    """Try to parse a free-form appointment time string into a datetime."""
+    """Parse a free-form appointment time string into a datetime."""
+    import re
+
+    # Normalize: lowercase, collapse spaces, handle am/pm variations
+    s = time_str.strip()
+    s = re.sub(r'\s+', ' ', s)
+    s = re.sub(r'(\d)(am|pm)', r'\1 \2', s, flags=re.IGNORECASE)  # "10am" -> "10 am"
+    s = re.sub(r'^(monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+', '', s, flags=re.IGNORECASE)  # strip day name
+
     formats = [
-        "%A, %B %d at %I:%M %p",
-        "%A %B %d at %I:%M %p",
-        "%A, %B %d at %I %p",
         "%B %d at %I:%M %p",
+        "%B %d at %I %p",
+        "%B %d, %Y at %I:%M %p",
+        "%B %d, %Y at %I %p",
+        "%A, %B %d at %I:%M %p",
+        "%A, %B %d at %I %p",
+        "%A %B %d at %I:%M %p",
+        "%A %B %d at %I %p",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d %H:%M",
     ]
+
     for fmt in formats:
         try:
-            dt = datetime.strptime(time_str.strip(), fmt)
-            # If no year, assume current year
+            dt = datetime.strptime(s.strip(), fmt)
             if dt.year == 1900:
                 dt = dt.replace(year=datetime.now().year)
             return dt
         except ValueError:
             continue
+
     logger.warning(f"Could not parse appointment time: {time_str!r}")
     return None
 
