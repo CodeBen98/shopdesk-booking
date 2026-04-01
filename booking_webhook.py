@@ -45,6 +45,17 @@ class BookingRequest(BaseModel):
     appointment_time: str # e.g. "Monday March 31 at 10:00 AM" — free-form from the AI
 
 
+class VapiBookingRequest(BaseModel):
+    """Vapi tool call payload — parameters are nested under 'parameters'."""
+    customer_name: str
+    customer_phone: str
+    vehicle_year: Optional[str] = ""
+    vehicle_make: Optional[str] = ""
+    vehicle_model: Optional[str] = ""
+    service: str
+    appointment_time: str
+
+
 @app.post("/book")
 async def book_appointment(req: BookingRequest):
     """
@@ -109,6 +120,96 @@ async def book_appointment(req: BookingRequest):
         ),
         "success": True,
         "calendar_link": cal_link or "",
+    })
+
+
+@app.post("/vapi/book")
+async def vapi_book_appointment(payload: dict):
+    """
+    Called by Vapi when the AI tool 'bookAppointment' is triggered.
+    Vapi sends: {"message": {"toolCalls": [{"function": {"arguments": {...}}}]}}
+    """
+    try:
+        # Extract arguments from Vapi tool call structure
+        tool_calls = payload.get("message", {}).get("toolCalls", [])
+        if not tool_calls:
+            # Direct call with flat args (fallback)
+            args = payload
+        else:
+            args = tool_calls[0].get("function", {}).get("arguments", {})
+            if isinstance(args, str):
+                import json as _json
+                args = _json.loads(args)
+
+        req = VapiBookingRequest(
+            customer_name=args.get("customer_name", ""),
+            customer_phone=args.get("customer_phone", ""),
+            vehicle_year=args.get("vehicle_year", ""),
+            vehicle_make=args.get("vehicle_make", ""),
+            vehicle_model=args.get("vehicle_model", ""),
+            service=args.get("service", ""),
+            appointment_time=args.get("appointment_time", "")
+        )
+    except Exception as e:
+        logger.error(f"Failed to parse Vapi booking request: {e} — payload: {payload}")
+        return JSONResponse({"result": "I had trouble processing that booking. Let me take your number and have someone call you right back."})
+
+    vehicle_str = f"{req.vehicle_year} {req.vehicle_make} {req.vehicle_model}".strip()
+    slot_dt = _parse_appointment_time(req.appointment_time)
+
+    # Book calendar event
+    cal_link = None
+    try:
+        cal = GoogleCalendarService()
+        cal_link = await cal.book_appointment(
+            name=req.customer_name,
+            phone=req.customer_phone,
+            vehicle=vehicle_str or "Vehicle TBD",
+            issue=req.service,
+            slot_datetime=slot_dt,
+        )
+        logger.info(f"Vapi booking — calendar event created: {cal_link}")
+    except Exception as e:
+        logger.error(f"Vapi booking — calendar failed: {e}")
+
+    # Send SMS confirmation
+    try:
+        await send_confirmation(
+            to_phone=req.customer_phone,
+            name=req.customer_name,
+            vehicle=vehicle_str or "your vehicle",
+            slot=slot_dt or req.appointment_time,
+            shop_name=SHOP_NAME,
+            shop_address=SHOP_ADDRESS,
+        )
+    except Exception as e:
+        logger.error(f"Vapi booking — SMS failed: {e}")
+
+    # Owner alert
+    try:
+        await send_owner_alert({
+            "name": req.customer_name,
+            "phone": req.customer_phone,
+            "vehicle": vehicle_str,
+            "issue": req.service,
+            "slot": req.appointment_time,
+        })
+    except Exception as e:
+        logger.error(f"Vapi booking — owner alert failed: {e}")
+
+    slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else req.appointment_time
+    result_msg = (
+        f"Booked. {req.customer_name} is confirmed for {req.service} on {slot_display}. "
+        f"Confirmation text sent to {req.customer_phone}."
+    )
+
+    # Vapi expects {"results": [{"toolCallId": ..., "result": ...}]}
+    tool_call_id = tool_calls[0].get("id", "") if tool_calls else ""
+    return JSONResponse({
+        "results": [{
+            "toolCallId": tool_call_id,
+            "result": result_msg
+        }]
     })
 
 
