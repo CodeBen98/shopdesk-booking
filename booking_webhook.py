@@ -13,7 +13,7 @@ import logging
 from datetime import datetime
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from typing import Optional
 from pydantic import BaseModel
@@ -57,26 +57,53 @@ class VapiBookingRequest(BaseModel):
 
 
 @app.post("/book")
-async def book_appointment(req: BookingRequest):
+async def book_appointment(request: Request):
     """
-    Called by ElevenLabs when the AI has collected all booking info.
-    Creates a Google Calendar event + sends SMS confirmation + owner alert.
-    Returns a short confirmation string the AI reads back to the caller.
+    Universal booking endpoint — handles both Vapi and legacy ElevenLabs formats.
+    Vapi sends: {"message": {"toolCalls": [{"id": "...", "function": {"name": "...", "arguments": "{...}"}}]}}
+    Legacy sends: {"name": "...", "phone": "...", "vehicle": "...", "issue": "...", "appointment_time": "..."}
     """
-    logger.info(f"Booking request: {req}")
+    body = await request.json()
+    logger.info(f"Booking request body: {str(body)[:300]}")
 
-    # Try to parse the appointment time
-    slot_dt = _parse_appointment_time(req.appointment_time)
+    # Detect Vapi format
+    tool_calls = body.get("message", {}).get("toolCalls", [])
+    is_vapi = bool(tool_calls)
+
+    if is_vapi:
+        tc = tool_calls[0]
+        tool_call_id = tc.get("id", "")
+        raw_args = tc.get("function", {}).get("arguments", "{}")
+        if isinstance(raw_args, str):
+            import json as _json
+            args = _json.loads(raw_args)
+        else:
+            args = raw_args
+        vehicle_str = f"{args.get('vehicle_year','')} {args.get('vehicle_make','')} {args.get('vehicle_model','')}".strip()
+        name = args.get("customer_name", "")
+        phone = args.get("customer_phone", "")
+        issue = args.get("service", "")
+        appointment_time = args.get("appointment_time", "")
+    else:
+        # Legacy ElevenLabs format
+        name = body.get("name", "")
+        phone = body.get("phone", "")
+        vehicle_str = body.get("vehicle", "")
+        issue = body.get("issue", "")
+        appointment_time = body.get("appointment_time", "")
+        tool_call_id = None
+
+    slot_dt = _parse_appointment_time(appointment_time)
 
     # Book calendar event
     cal_link = None
     try:
         cal = GoogleCalendarService()
         cal_link = await cal.book_appointment(
-            name=req.name,
-            phone=req.phone,
-            vehicle=req.vehicle,
-            issue=req.issue,
+            name=name,
+            phone=phone,
+            vehicle=vehicle_str or "Vehicle TBD",
+            issue=issue,
             slot_datetime=slot_dt,
         )
         logger.info(f"Calendar event created: {cal_link}")
@@ -86,41 +113,54 @@ async def book_appointment(req: BookingRequest):
     # Send customer SMS confirmation
     try:
         await send_confirmation(
-            to_phone=req.phone,
-            name=req.name,
-            vehicle=req.vehicle,
-            slot=slot_dt or req.appointment_time,
+            to_phone=phone,
+            name=name,
+            vehicle=vehicle_str or "your vehicle",
+            slot=slot_dt or appointment_time,
             shop_name=SHOP_NAME,
             shop_address=SHOP_ADDRESS,
         )
-        logger.info(f"SMS confirmation sent to {req.phone}")
+        logger.info(f"SMS confirmation sent to {phone}")
     except Exception as e:
         logger.error(f"SMS confirmation failed: {e}")
 
     # Send owner alert
     try:
         await send_owner_alert({
-            "name": req.name,
-            "phone": req.phone,
-            "vehicle": req.vehicle,
-            "issue": req.issue,
-            "slot": req.appointment_time,
+            "name": name,
+            "phone": phone,
+            "vehicle": vehicle_str,
+            "issue": issue,
+            "slot": appointment_time,
         })
         logger.info("Owner alert sent")
     except Exception as e:
         logger.error(f"Owner alert failed: {e}")
 
-    # Return confirmation message the AI will read back
-    slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else req.appointment_time
-    return JSONResponse({
-        "confirmation": (
-            f"Perfect, you're all set. We've booked {req.name} for {req.issue} "
-            f"on {slot_display}. A confirmation text is on its way to {req.phone}. "
-            f"We look forward to seeing you!"
-        ),
-        "success": True,
-        "calendar_link": cal_link or "",
-    })
+    slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time
+    confirmation_msg = (
+        f"Booked. {name} confirmed for {issue} on {slot_display}. "
+        f"Confirmation text sent to {phone}."
+    )
+
+    # Return correct format based on caller
+    if is_vapi:
+        return JSONResponse({
+            "results": [{
+                "toolCallId": tool_call_id,
+                "result": confirmation_msg
+            }]
+        })
+    else:
+        return JSONResponse({
+            "confirmation": (
+                f"Perfect, you're all set. We've booked {name} for {issue} "
+                f"on {slot_display}. A confirmation text is on its way to {phone}. "
+                f"We look forward to seeing you!"
+            ),
+            "success": True,
+            "calendar_link": cal_link or "",
+        })
 
 
 @app.post("/vapi/book")
