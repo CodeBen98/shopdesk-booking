@@ -13,6 +13,7 @@ import logging
 from datetime import datetime
 
 import uvicorn
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from typing import Optional
@@ -20,6 +21,10 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 load_dotenv()
+
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")
 
 from calendar_service import GoogleCalendarService
 from sms_service import send_confirmation, send_owner_alert
@@ -54,6 +59,48 @@ class VapiBookingRequest(BaseModel):
     vehicle_model: Optional[str] = ""
     service: str
     appointment_time: str
+
+
+async def save_booking_to_supabase(
+    shop_id: str, customer_name: str, customer_phone: str,
+    vehicle: str, service: str, slot_dt, appointment_time: str,
+    calendar_link: str = ""
+) -> None:
+    """Write booking to Supabase bookings table. Never raises — failures are logged only."""
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id:
+        logger.warning("Supabase env vars not set — skipping DB write")
+        return
+    try:
+        appt_iso = slot_dt.isoformat() if slot_dt else appointment_time
+        payload = {
+            "shop_id": shop_id,
+            "customer_name": customer_name,
+            "customer_phone": customer_phone,
+            "vehicle": vehicle or None,
+            "service": service or None,
+            "appointment_at": appt_iso,
+            "status": "scheduled",
+            "sms_sent": False,
+            "notes": f"Calendar: {calendar_link}" if calendar_link else None,
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/bookings",
+                json=payload,
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                    "Prefer": "return=minimal",
+                },
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Booking saved to Supabase for {customer_name}")
+            else:
+                logger.error(f"Supabase booking insert failed: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        logger.error(f"save_booking_to_supabase error: {e}")
 
 
 @app.post("/book")
@@ -109,6 +156,21 @@ async def book_appointment(request: Request):
         logger.info(f"Calendar event created: {cal_link}")
     except Exception as e:
         logger.error(f"Calendar booking failed: {e}")
+
+    # Write booking to Supabase
+    try:
+        await save_booking_to_supabase(
+            shop_id=DEFAULT_SHOP_ID,
+            customer_name=name,
+            customer_phone=phone,
+            vehicle=vehicle_str or "",
+            service=issue,
+            slot_dt=slot_dt,
+            appointment_time=appointment_time,
+            calendar_link=cal_link or "",
+        )
+    except Exception as e:
+        logger.error(f"Supabase write error: {e}")
 
     # Send customer SMS confirmation
     try:
