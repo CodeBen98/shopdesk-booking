@@ -164,22 +164,27 @@ async def book_appointment(request: Request):
                         shop_refresh_token = rows[0].get("google_refresh_token")
                         shop_calendar_id = rows[0].get("google_calendar_id") or CALENDAR_ID
 
-        # Use per-shop token if available, otherwise fall back to system credentials
-        google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
-        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
-        cal = GoogleCalendarService(
-            refresh_token=shop_refresh_token,
-            client_id=google_client_id,
-            client_secret=google_client_secret,
-        )
-        cal_link = await cal.book_appointment(
-            name=name,
-            phone=phone,
-            vehicle=vehicle_str or "Vehicle TBD",
-            issue=issue,
-            slot_datetime=slot_dt,
-        )
-        logger.info(f"Calendar event created: {cal_link}")
+        if not shop_refresh_token:
+            # No calendar connected — skip calendar booking, notify owner via email instead
+            logger.info("No Google refresh token for shop — skipping calendar, owner will be notified via email")
+            cal_link = None
+        else:
+            # Use per-shop OAuth token
+            google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+            google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+            cal = GoogleCalendarService(
+                refresh_token=shop_refresh_token,
+                client_id=google_client_id,
+                client_secret=google_client_secret,
+            )
+            cal_link = await cal.book_appointment(
+                name=name,
+                phone=phone,
+                vehicle=vehicle_str or "Vehicle TBD",
+                issue=issue,
+                slot_datetime=slot_dt,
+            )
+            logger.info(f"Calendar event created: {cal_link}")
     except Exception as e:
         logger.error(f"Calendar booking failed: {e}")
 
