@@ -245,6 +245,7 @@ async def book_appointment(request: Request):
         appointment_time = args.get("appointment_time", "")
         assistant_id = args.get("assistant_id", "")
     else:
+        assistant_id = body.get("assistant_id", "")
         # Legacy ElevenLabs format
         name = body.get("name", "")
         phone = body.get("phone", "")
@@ -255,8 +256,12 @@ async def book_appointment(request: Request):
 
     slot_dt = _parse_appointment_time(appointment_time)
 
-    # Look up shop by assistant ID (production multi-shop routing)
-    shop_row = await get_shop_by_assistant(assistant_id)
+    # Look up shop — prefer query param shop_id (injected by provision), fallback to assistant_id
+    query_shop_id = request.query_params.get("shop_id", "")
+    if query_shop_id:
+        shop_row = await get_shop_by_id(query_shop_id)
+    else:
+        shop_row = await get_shop_by_assistant(assistant_id)
     shop_id_resolved = shop_row.get("id") or DEFAULT_SHOP_ID
 
     # Book calendar event — use per-shop refresh token if available
