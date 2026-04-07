@@ -151,6 +151,7 @@ app = FastAPI(title="ShopDesk Booking Webhook")
 SHOP_NAME = os.getenv("SHOP_NAME", "Mike's Auto Repair")
 SHOP_ADDRESS = os.getenv("SHOP_ADDRESS", "1234 Orange Ave, Orlando, FL 32801")
 SHOP_PHONE = os.getenv("SHOP_PHONE", "(407) 555-0123")
+CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
 
 
 class BookingRequest(BaseModel):
@@ -492,11 +493,44 @@ def _parse_appointment_time(time_str: str) -> Optional[datetime]:
     """Parse a free-form appointment time string into a datetime."""
     import re
 
-    # Normalize: lowercase, collapse spaces, handle am/pm variations
+    # Normalize: collapse spaces, handle am/pm variations
     s = time_str.strip()
     s = re.sub(r'\s+', ' ', s)
     s = re.sub(r'(\d)(am|pm)', r'\1 \2', s, flags=re.IGNORECASE)  # "10am" -> "10 am"
-    s = re.sub(r'^(monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+', '', s, flags=re.IGNORECASE)  # strip day name
+
+    now = datetime.now()
+    current_year = now.year
+
+    # Handle day-of-week only formats like "Thursday at 10am" or "Thursday at noon"
+    # Convert "noon" -> "12:00 PM", "midnight" -> "12:00 AM"
+    s = re.sub(r'\bnoon\b', '12:00 PM', s, flags=re.IGNORECASE)
+    s = re.sub(r'\bmidnight\b', '12:00 AM', s, flags=re.IGNORECASE)
+
+    # If string starts with a day name only (no month), resolve to next occurrence of that day
+    day_only_match = re.match(
+        r'^(monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+at\s+(.+)$',
+        s, re.IGNORECASE
+    )
+    if day_only_match:
+        day_name = day_only_match.group(1).lower()
+        time_part = day_only_match.group(2).strip()
+        days = ['monday','tuesday','wednesday','thursday','friday','saturday','sunday']
+        target_weekday = days.index(day_name)
+        today_weekday = now.weekday()
+        days_ahead = (target_weekday - today_weekday) % 7
+        if days_ahead == 0:
+            days_ahead = 7  # next week if today
+        target_date = now + __import__('datetime').timedelta(days=days_ahead)
+        # Try to parse the time part
+        for time_fmt in ["%I:%M %p", "%I %p", "%H:%M"]:
+            try:
+                t = datetime.strptime(time_part.strip(), time_fmt)
+                return target_date.replace(hour=t.hour, minute=t.minute, second=0, microsecond=0)
+            except ValueError:
+                continue
+
+    # Strip leading day name before month (e.g. "Thursday April 10 at 10am")
+    s_no_day = re.sub(r'^(monday|tuesday|wednesday|thursday|friday|saturday|sunday),?\s+', '', s, flags=re.IGNORECASE)
 
     formats = [
         "%B %d at %I:%M %p",
@@ -507,18 +541,21 @@ def _parse_appointment_time(time_str: str) -> Optional[datetime]:
         "%A, %B %d at %I %p",
         "%A %B %d at %I:%M %p",
         "%A %B %d at %I %p",
+        "%B %d %Y at %I:%M %p",
+        "%B %d %Y at %I %p",
         "%Y-%m-%dT%H:%M:%S",
         "%Y-%m-%d %H:%M",
     ]
 
-    for fmt in formats:
-        try:
-            dt = datetime.strptime(s.strip(), fmt)
-            if dt.year == 1900:
-                dt = dt.replace(year=datetime.now().year)
-            return dt
-        except ValueError:
-            continue
+    for candidate in [s_no_day, s]:
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(candidate.strip(), fmt)
+                if dt.year == 1900:
+                    dt = dt.replace(year=current_year)
+                return dt
+            except ValueError:
+                continue
 
     logger.warning(f"Could not parse appointment time: {time_str!r}")
     return None
