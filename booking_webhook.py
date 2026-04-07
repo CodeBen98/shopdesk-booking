@@ -28,6 +28,74 @@ DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")
 
 from calendar_service import GoogleCalendarService
 from sms_service import send_confirmation, send_owner_alert
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+
+GMAIL_USER = os.getenv("GMAIL_USER", "slarve@shopdesk.site")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+
+async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
+                              customer_phone: str, vehicle: str, service: str,
+                              appointment_time: str, calendar_link: str = "") -> None:
+    """Send booking notification email to shop owner when no calendar is connected."""
+    if not to_email or not GMAIL_APP_PASSWORD:
+        logger.warning("Email not configured — skipping booking email")
+        return
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = f"New Booking — {customer_name} — {service}"
+        msg["From"] = f"ShopDesk <{GMAIL_USER}>"
+        msg["To"] = to_email
+
+        slot_display = appointment_time
+        text = f"""New appointment booked at {shop_name}
+
+Customer: {customer_name}
+Phone: {customer_phone}
+Vehicle: {vehicle}
+Service: {service}
+Time: {slot_display}
+
+{"Calendar: " + calendar_link if calendar_link else "Tip: Connect Google Calendar in your ShopDesk settings to automatically add bookings to your calendar."}
+
+View all bookings: https://app.shopdesk.site/dashboard/bookings
+
+— ShopDesk AI Receptionist"""
+
+        html = f"""<div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:24px">
+<div style="background:#0b141e;padding:16px 24px;border-radius:8px 8px 0 0;border-bottom:3px solid #0F7695">
+  <span style="font-size:18px;font-weight:700;color:#f4f5f7">ShopDesk</span>
+</div>
+<div style="background:#fff;padding:32px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
+  <h2 style="font-size:20px;font-weight:700;color:#111827;margin:0 0 4px">New Appointment Booked</h2>
+  <p style="color:#6b7280;margin:0 0 24px;font-size:14px">{shop_name}</p>
+  <table style="width:100%;border-collapse:collapse;font-size:14px">
+    <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280;width:120px">Customer</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827;font-weight:600">{customer_name}</td></tr>
+    <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Phone</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{customer_phone}</td></tr>
+    <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Vehicle</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{vehicle}</td></tr>
+    <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Service</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{service}</td></tr>
+    <tr><td style="padding:10px 0;color:#6b7280">Time</td><td style="padding:10px 0;color:#0F7695;font-weight:600">{slot_display}</td></tr>
+  </table>
+  <div style="margin-top:24px">
+    <a href="https://app.shopdesk.site/dashboard/bookings" style="background:#0F7695;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block">View in Dashboard</a>
+  </div>
+  {"<p style='margin-top:16px;font-size:13px;color:#6b7280'>💡 <a href=\"https://app.shopdesk.site/dashboard/settings\" style=\"color:#0F7695\">Connect Google Calendar</a> to automatically add bookings.</p>" if not calendar_link else ""}
+</div>
+</div>"""
+
+        msg.attach(MIMEText(text, "plain"))
+        msg.attach(MIMEText(html, "html"))
+
+        loop = __import__('asyncio').get_event_loop()
+        def _send():
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+                s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
+                s.sendmail(GMAIL_USER, to_email, msg.as_string())
+        await loop.run_in_executor(None, _send)
+        logger.info(f"Booking email sent to {to_email}")
+    except Exception as e:
+        logger.error(f"send_booking_email error: {e}")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -229,6 +297,35 @@ async def book_appointment(request: Request):
         logger.info("Owner alert sent")
     except Exception as e:
         logger.error(f"Owner alert failed: {e}")
+
+    # Send booking email to shop owner (always, regardless of calendar status)
+    try:
+        shop_email = None
+        shop_name_local = SHOP_NAME
+        if SUPABASE_URL and SUPABASE_SERVICE_KEY and DEFAULT_SHOP_ID:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/shops?id=eq.{DEFAULT_SHOP_ID}&select=email,name",
+                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                    timeout=5,
+                )
+                if resp.status_code == 200 and resp.json():
+                    row = resp.json()[0]
+                    shop_email = row.get("email")
+                    shop_name_local = row.get("name") or SHOP_NAME
+        if shop_email:
+            await send_booking_email(
+                to_email=shop_email,
+                shop_name=shop_name_local,
+                customer_name=name,
+                customer_phone=phone,
+                vehicle=vehicle_str or "Vehicle TBD",
+                service=issue,
+                appointment_time=slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time,
+                calendar_link=cal_link or "",
+            )
+    except Exception as e:
+        logger.error(f"Booking email failed: {e}")
 
     slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time
     confirmation_msg = (
