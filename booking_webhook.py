@@ -71,41 +71,17 @@ async def get_shop_by_id(shop_id: str) -> dict:
 
 from calendar_service import GoogleCalendarService
 from sms_service import send_confirmation, send_owner_alert
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-
-GMAIL_USER = os.getenv("GMAIL_USER", "slarve@shopdesk.site")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@email.shopdesk.site")
 
 async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
                               customer_phone: str, vehicle: str, service: str,
                               appointment_time: str, calendar_link: str = "") -> None:
-    """Send booking notification email to shop owner when no calendar is connected."""
-    if not to_email or not GMAIL_APP_PASSWORD:
+    """Send booking notification email to shop owner via Resend API."""
+    if not to_email or not RESEND_API_KEY:
         logger.warning("Email not configured — skipping booking email")
         return
     try:
-        msg = MIMEMultipart("alternative")
-        msg["Subject"] = f"New Booking — {customer_name} — {service}"
-        msg["From"] = f"ShopDesk <{GMAIL_USER}>"
-        msg["To"] = to_email
-
-        slot_display = appointment_time
-        text = f"""New appointment booked at {shop_name}
-
-Customer: {customer_name}
-Phone: {customer_phone}
-Vehicle: {vehicle}
-Service: {service}
-Time: {slot_display}
-
-{"Calendar: " + calendar_link if calendar_link else "Tip: Connect Google Calendar in your ShopDesk settings to automatically add bookings to your calendar."}
-
-View all bookings: https://app.shopdesk.site/dashboard/bookings
-
-— ShopDesk AI Receptionist"""
-
         html = f"""<div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:24px">
 <div style="background:#0b141e;padding:16px 24px;border-radius:8px 8px 0 0;border-bottom:3px solid #0F7695">
   <span style="font-size:18px;font-weight:700;color:#f4f5f7">ShopDesk</span>
@@ -118,7 +94,7 @@ View all bookings: https://app.shopdesk.site/dashboard/bookings
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Phone</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{customer_phone}</td></tr>
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Vehicle</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{vehicle}</td></tr>
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Service</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{service}</td></tr>
-    <tr><td style="padding:10px 0;color:#6b7280">Time</td><td style="padding:10px 0;color:#0F7695;font-weight:600">{slot_display}</td></tr>
+    <tr><td style="padding:10px 0;color:#6b7280">Time</td><td style="padding:10px 0;color:#0F7695;font-weight:600">{appointment_time}</td></tr>
   </table>
   <div style="margin-top:24px">
     <a href="https://app.shopdesk.site/dashboard/bookings" style="background:#0F7695;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block">View in Dashboard</a>
@@ -127,16 +103,23 @@ View all bookings: https://app.shopdesk.site/dashboard/bookings
 </div>
 </div>"""
 
-        msg.attach(MIMEText(text, "plain"))
-        msg.attach(MIMEText(html, "html"))
-
-        loop = __import__('asyncio').get_event_loop()
-        def _send():
-            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
-                s.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-                s.sendmail(GMAIL_USER, to_email, msg.as_string())
-        await loop.run_in_executor(None, _send)
-        logger.info(f"Booking email sent to {to_email}")
+        payload = {
+            "from": f"ShopDesk <{FROM_EMAIL}>",
+            "to": [to_email],
+            "subject": f"New Booking — {customer_name} — {service}",
+            "html": html,
+        }
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "https://api.resend.com/emails",
+                json=payload,
+                headers={"Authorization": f"Bearer {RESEND_API_KEY}"},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                logger.info(f"Booking email sent to {to_email}")
+            else:
+                logger.error(f"Resend email failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
         logger.error(f"send_booking_email error: {e}")
 
