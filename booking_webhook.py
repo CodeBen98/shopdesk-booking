@@ -142,10 +142,36 @@ async def book_appointment(request: Request):
 
     slot_dt = _parse_appointment_time(appointment_time)
 
-    # Book calendar event
+    # Book calendar event — use per-shop refresh token if available
     cal_link = None
     try:
-        cal = GoogleCalendarService()
+        # Try to get per-shop Google refresh token from Supabase
+        shop_refresh_token = None
+        shop_calendar_id = CALENDAR_ID
+        if SUPABASE_URL and SUPABASE_SERVICE_KEY and DEFAULT_SHOP_ID:
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/shops?id=eq.{DEFAULT_SHOP_ID}&select=google_refresh_token,google_calendar_id",
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    },
+                    timeout=5,
+                )
+                if resp.status_code == 200:
+                    rows = resp.json()
+                    if rows:
+                        shop_refresh_token = rows[0].get("google_refresh_token")
+                        shop_calendar_id = rows[0].get("google_calendar_id") or CALENDAR_ID
+
+        # Use per-shop token if available, otherwise fall back to system credentials
+        google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
+        google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
+        cal = GoogleCalendarService(
+            refresh_token=shop_refresh_token,
+            client_id=google_client_id,
+            client_secret=google_client_secret,
+        )
         cal_link = await cal.book_appointment(
             name=name,
             phone=phone,

@@ -60,8 +60,12 @@ SHOP_TIMEZONE = ZoneInfo(TIMEZONE)
 class GoogleCalendarService:
     """Wraps Google Calendar API with business-hours slot logic."""
 
-    def __init__(self):
-        _write_google_files_from_env()
+    def __init__(self, refresh_token: str = None, client_id: str = None, client_secret: str = None):
+        self._refresh_token = refresh_token
+        self._client_id = client_id or os.getenv("GOOGLE_CLIENT_ID", "")
+        self._client_secret = client_secret or os.getenv("GOOGLE_CLIENT_SECRET", "")
+        if not refresh_token:
+            _write_google_files_from_env()
         self._service = self._build_service()
 
     def _build_service(self):
@@ -73,11 +77,23 @@ class GoogleCalendarService:
 
         creds = None
 
-        # 1. Load existing token if present
+        # If a refresh token was passed directly (per-shop OAuth), use it
+        if self._refresh_token:
+            creds = Credentials(
+                token=None,
+                refresh_token=self._refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self._client_id,
+                client_secret=self._client_secret,
+                scopes=SCOPES,
+            )
+            creds.refresh(Request())
+            return build("calendar", "v3", credentials=creds, cache_discovery=False)
+
+        # Fall back to file-based credentials (shared/system credentials)
         if os.path.exists(TOKEN_FILE):
             creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
 
-        # 2. Refresh or run the OAuth flow if credentials are missing/expired
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
@@ -85,7 +101,6 @@ class GoogleCalendarService:
                 flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
                 creds = flow.run_local_server(port=0)
 
-            # 3. Save token for future runs
             with open(TOKEN_FILE, "w") as token_file:
                 token_file.write(creds.to_json())
             logger.info(f"OAuth token saved to {TOKEN_FILE}")
