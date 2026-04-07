@@ -24,7 +24,50 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")
+DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")  # fallback only
+
+_shop_cache: dict = {}  # simple in-memory cache: assistant_id -> shop row
+
+async def get_shop_by_assistant(assistant_id: str) -> dict:
+    """Look up shop from Supabase by Vapi assistant ID. Returns shop dict or empty dict."""
+    if not assistant_id:
+        return await get_shop_by_id(DEFAULT_SHOP_ID)
+    if assistant_id in _shop_cache:
+        return _shop_cache[assistant_id]
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,email,google_refresh_token,google_calendar_id",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                timeout=5,
+            )
+            if resp.status_code == 200 and resp.json():
+                shop = resp.json()[0]
+                _shop_cache[assistant_id] = shop
+                return shop
+    except Exception as e:
+        logger.error(f"get_shop_by_assistant error: {e}")
+    # Fall back to default shop ID
+    return await get_shop_by_id(DEFAULT_SHOP_ID)
+
+async def get_shop_by_id(shop_id: str) -> dict:
+    """Look up shop by ID."""
+    if not shop_id or not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return {}
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,email,google_refresh_token,google_calendar_id",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                timeout=5,
+            )
+            if resp.status_code == 200 and resp.json():
+                return resp.json()[0]
+    except Exception as e:
+        logger.error(f"get_shop_by_id error: {e}")
+    return {}
 
 from calendar_service import GoogleCalendarService
 from sms_service import send_confirmation, send_owner_alert
@@ -199,6 +242,7 @@ async def book_appointment(request: Request):
         phone = args.get("customer_phone", "")
         issue = args.get("service", "")
         appointment_time = args.get("appointment_time", "")
+        assistant_id = args.get("assistant_id", "")
     else:
         # Legacy ElevenLabs format
         name = body.get("name", "")
@@ -210,27 +254,15 @@ async def book_appointment(request: Request):
 
     slot_dt = _parse_appointment_time(appointment_time)
 
+    # Look up shop by assistant ID (production multi-shop routing)
+    shop_row = await get_shop_by_assistant(assistant_id)
+    shop_id_resolved = shop_row.get("id") or DEFAULT_SHOP_ID
+
     # Book calendar event — use per-shop refresh token if available
     cal_link = None
     try:
-        # Try to get per-shop Google refresh token from Supabase
-        shop_refresh_token = None
-        shop_calendar_id = CALENDAR_ID
-        if SUPABASE_URL and SUPABASE_SERVICE_KEY and DEFAULT_SHOP_ID:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/shops?id=eq.{DEFAULT_SHOP_ID}&select=google_refresh_token,google_calendar_id",
-                    headers={
-                        "apikey": SUPABASE_SERVICE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                    },
-                    timeout=5,
-                )
-                if resp.status_code == 200:
-                    rows = resp.json()
-                    if rows:
-                        shop_refresh_token = rows[0].get("google_refresh_token")
-                        shop_calendar_id = rows[0].get("google_calendar_id") or CALENDAR_ID
+        shop_refresh_token = shop_row.get("google_refresh_token")
+        shop_calendar_id = shop_row.get("google_calendar_id") or CALENDAR_ID
 
         if not shop_refresh_token:
             # No calendar connected — skip calendar booking, notify owner via email instead
@@ -259,7 +291,7 @@ async def book_appointment(request: Request):
     # Write booking to Supabase
     try:
         await save_booking_to_supabase(
-            shop_id=DEFAULT_SHOP_ID,
+            shop_id=shop_id_resolved,
             customer_name=name,
             customer_phone=phone,
             vehicle=vehicle_str or "",
@@ -300,19 +332,8 @@ async def book_appointment(request: Request):
 
     # Send booking email to shop owner (always, regardless of calendar status)
     try:
-        shop_email = None
-        shop_name_local = SHOP_NAME
-        if SUPABASE_URL and SUPABASE_SERVICE_KEY and DEFAULT_SHOP_ID:
-            async with httpx.AsyncClient() as client:
-                resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/shops?id=eq.{DEFAULT_SHOP_ID}&select=email,name",
-                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
-                    timeout=5,
-                )
-                if resp.status_code == 200 and resp.json():
-                    row = resp.json()[0]
-                    shop_email = row.get("email")
-                    shop_name_local = row.get("name") or SHOP_NAME
+        shop_email = shop_row.get("email")
+        shop_name_local = shop_row.get("name") or SHOP_NAME
         if shop_email:
             await send_booking_email(
                 to_email=shop_email,
