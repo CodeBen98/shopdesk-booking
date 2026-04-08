@@ -227,8 +227,10 @@ async def book_appointment(request: Request):
         issue = args.get("service", "")
         appointment_time = args.get("appointment_time", "")
         assistant_id = args.get("assistant_id", "")
+        vapi_call_id = body.get("message", {}).get("call", {}).get("id", "")
     else:
         assistant_id = body.get("assistant_id", "")
+        vapi_call_id = ""
         # Legacy ElevenLabs format
         name = body.get("name", "")
         phone = body.get("phone", "")
@@ -292,6 +294,25 @@ async def book_appointment(request: Request):
         )
     except Exception as e:
         logger.error(f"Supabase write error: {e}")
+
+    # Update the call record with caller name and duration (backfill from booking)
+    if vapi_call_id and name and SUPABASE_URL and SUPABASE_SERVICE_KEY:
+        try:
+            async with httpx.AsyncClient() as client:
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/calls?vapi_call_id=eq.{vapi_call_id}",
+                    json={"caller_name": name},
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "return=minimal",
+                    },
+                    timeout=10,
+                )
+                logger.info(f"Updated call record caller_name for vapi_call_id={vapi_call_id}")
+        except Exception as e:
+            logger.error(f"Call record update error: {e}")
 
     # Send customer SMS confirmation
     try:
