@@ -24,6 +24,9 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+# Log key type at startup for verification
+_key_role = "service_role" if "service_role" in SUPABASE_SERVICE_KEY else "anon_or_missing"
+print(f"[STARTUP] SUPABASE key type: {_key_role} (len={len(SUPABASE_SERVICE_KEY)})")
 DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")  # fallback only
 
 _shop_cache: dict = {}  # simple in-memory cache: assistant_id -> shop row
