@@ -311,6 +311,36 @@ async def book_appointment(request: Request):
                     timeout=10,
                 )
                 logger.info(f"Updated call record caller_name for vapi_call_id={vapi_call_id}")
+            # Also fetch duration from Vapi API since durationSeconds is often null in webhook
+            vapi_key = os.environ.get("VAPI_API_KEY", "")
+            if vapi_key:
+                try:
+                    vapi_resp = await client.get(
+                        f"https://api.vapi.ai/call/{vapi_call_id}",
+                        headers={"Authorization": f"Bearer {vapi_key}"},
+                        timeout=10,
+                    )
+                    if vapi_resp.status_code == 200:
+                        call_data = vapi_resp.json()
+                        started = call_data.get("startedAt")
+                        ended = call_data.get("endedAt")
+                        if started and ended:
+                            from datetime import datetime
+                            duration_s = int((datetime.fromisoformat(ended.replace("Z","+00:00")) - datetime.fromisoformat(started.replace("Z","+00:00"))).total_seconds())
+                            await client.patch(
+                                f"{SUPABASE_URL}/rest/v1/calls?vapi_call_id=eq.{vapi_call_id}",
+                                json={"duration_seconds": duration_s, "ended_at": ended},
+                                headers={
+                                    "apikey": SUPABASE_SERVICE_KEY,
+                                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                                    "Content-Type": "application/json",
+                                    "Prefer": "return=minimal",
+                                },
+                                timeout=10,
+                            )
+                            logger.info(f"Updated call duration={duration_s}s for vapi_call_id={vapi_call_id}")
+                except Exception as ve:
+                    logger.error(f"Vapi duration fetch error: {ve}")
         except Exception as e:
             logger.error(f"Call record update error: {e}")
 
