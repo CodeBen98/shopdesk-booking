@@ -333,6 +333,8 @@ async def book_appointment(request: Request):
     if vapi_call_id and name and SUPABASE_URL and SUPABASE_SERVICE_KEY:
         try:
             import asyncio
+            # Wait 3 seconds first — call-started webhook may not have created the record yet
+            await asyncio.sleep(3)
             # Retry up to 5 times — call record may not exist yet (race condition with call-started webhook)
             async with httpx.AsyncClient() as client:
                 for attempt in range(5):
