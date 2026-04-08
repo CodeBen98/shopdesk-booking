@@ -57,13 +57,40 @@ BUSINESS_HOURS = {
 SHOP_TIMEZONE = ZoneInfo(TIMEZONE)
 
 
+def parse_shop_hours(hours_json: dict) -> dict:
+    """Convert shop hours from Supabase JSON to BUSINESS_HOURS format.
+    
+    Input: {"monday": {"open": true, "from": "12:00", "to": "19:00"}, ...}
+    Output: {0: (12, 19), 1: (12, 19), ..., 5: None, 6: None}
+    """
+    day_map = {
+        'monday': 0, 'tuesday': 1, 'wednesday': 2, 'thursday': 3,
+        'friday': 4, 'saturday': 5, 'sunday': 6
+    }
+    result = {}
+    for day_name, idx in day_map.items():
+        day_data = hours_json.get(day_name, {})
+        if day_data.get('open') and day_data.get('from') and day_data.get('to'):
+            try:
+                open_h = int(day_data['from'].split(':')[0])
+                close_h = int(day_data['to'].split(':')[0])
+                result[idx] = (open_h, close_h)
+            except (ValueError, IndexError):
+                result[idx] = None
+        else:
+            result[idx] = None
+    return result
+
+
 class GoogleCalendarService:
     """Wraps Google Calendar API with business-hours slot logic."""
 
-    def __init__(self, refresh_token: str = None, client_id: str = None, client_secret: str = None):
+    def __init__(self, refresh_token: str = None, client_id: str = None, client_secret: str = None, shop_hours: dict = None):
         self._refresh_token = refresh_token
         self._client_id = client_id or os.getenv("GOOGLE_CLIENT_ID", "")
         self._client_secret = client_secret or os.getenv("GOOGLE_CLIENT_SECRET", "")
+        # Use shop-specific hours if provided, otherwise fall back to defaults
+        self._business_hours = parse_shop_hours(shop_hours) if shop_hours else BUSINESS_HOURS
         if not refresh_token:
             _write_google_files_from_env()
         self._service = self._build_service()
@@ -146,7 +173,7 @@ class GoogleCalendarService:
 
         while business_days_found < num_days and days_scanned < num_days * 5:
             weekday = current_date.weekday()
-            hours = BUSINESS_HOURS.get(weekday)
+            hours = self._business_hours.get(weekday)
 
             if hours:
                 business_days_found += 1
@@ -226,7 +253,7 @@ class GoogleCalendarService:
         business_days_seen = set()
         while len(business_days_seen) < num_days or len(slots) < num_days * 2:
             weekday = candidate.weekday()
-            hours = BUSINESS_HOURS.get(weekday)
+            hours = self._business_hours.get(weekday)
             if hours:
                 open_hour, close_hour = hours
                 if open_hour <= candidate.hour < close_hour:

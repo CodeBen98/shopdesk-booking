@@ -265,6 +265,7 @@ async def book_appointment(request: Request):
                 refresh_token=shop_refresh_token,
                 client_id=google_client_id,
                 client_secret=google_client_secret,
+                shop_hours=shop_row.get("hours"),
             )
             cal_link = await cal.book_appointment(
                 name=name,
