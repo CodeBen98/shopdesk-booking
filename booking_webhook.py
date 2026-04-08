@@ -175,6 +175,21 @@ async def save_booking_to_supabase(
             appt_iso = slot_dt.isoformat()
         else:
             appt_iso = appointment_time
+        # Look up call record UUID from vapi_call_id to link booking → call
+        call_uuid = None
+        if vapi_call_id:
+            try:
+                call_lookup = await httpx.AsyncClient().get(
+                    f"{SUPABASE_URL}/rest/v1/calls?vapi_call_id=eq.{vapi_call_id}&select=id",
+                    headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                    timeout=5,
+                )
+                rows = call_lookup.json()
+                if rows:
+                    call_uuid = rows[0].get("id")
+            except Exception:
+                pass
+
         payload = {
             "shop_id": shop_id,
             "customer_name": customer_name,
@@ -185,6 +200,7 @@ async def save_booking_to_supabase(
             "status": "scheduled",
             "sms_sent": False,
             "notes": f"Calendar: {calendar_link}" if calendar_link else None,
+            "call_id": call_uuid,
         }
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -299,6 +315,7 @@ async def book_appointment(request: Request):
             slot_dt=slot_dt,
             appointment_time=appointment_time,
             calendar_link=cal_link or "",
+            vapi_call_id=vapi_call_id,
         )
     except Exception as e:
         logger.error(f"Supabase write error: {e}")
