@@ -25,8 +25,14 @@ load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 # Log key type at startup for verification
-_key_role = "service_role" if "service_role" in SUPABASE_SERVICE_KEY else "anon_or_missing"
-print(f"[STARTUP] SUPABASE key type: {_key_role} (len={len(SUPABASE_SERVICE_KEY)})")
+try:
+    import base64 as _b64, json as _json
+    _payload = SUPABASE_SERVICE_KEY.split('.')[1] if SUPABASE_SERVICE_KEY else ''
+    _payload += '=' * (4 - len(_payload) % 4)
+    _key_role = _json.loads(_b64.b64decode(_payload)).get('role', 'unknown') if _payload else 'missing'
+except Exception:
+    _key_role = 'parse_error'
+print(f"[STARTUP] SUPABASE key role: {_key_role} (len={len(SUPABASE_SERVICE_KEY)})")
 DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")  # fallback only
 
 _shop_cache: dict = {}  # simple in-memory cache: assistant_id -> shop row
