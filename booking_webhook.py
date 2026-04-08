@@ -32,7 +32,7 @@ try:
     _key_role = _json.loads(_b64.b64decode(_payload)).get('role', 'unknown') if _payload else 'missing'
 except Exception:
     _key_role = 'parse_error'
-print(f"[STARTUP] SUPABASE key role: {_key_role} (len={len(SUPABASE_SERVICE_KEY)})")
+print(f"[STARTUP] SUPABASE key role: {_key_role} (len={len(SUPABASE_SERVICE_KEY)}) start={SUPABASE_SERVICE_KEY[:30] if SUPABASE_SERVICE_KEY else 'EMPTY'}")
 DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")  # fallback only
 
 _shop_cache: dict = {}  # simple in-memory cache: assistant_id -> shop row
