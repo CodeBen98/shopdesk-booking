@@ -323,11 +323,12 @@ async def book_appointment(request: Request):
             vapi_key = os.environ.get("VAPI_API_KEY", "")
             if vapi_key:
                 try:
-                    vapi_resp = await client.get(
+                    async with httpx.AsyncClient() as vapi_client:
+                     vapi_resp = await vapi_client.get(
                         f"https://api.vapi.ai/call/{vapi_call_id}",
                         headers={"Authorization": f"Bearer {vapi_key}"},
                         timeout=10,
-                    )
+                     )
                     if vapi_resp.status_code == 200:
                         call_data = vapi_resp.json()
                         started = call_data.get("startedAt")
