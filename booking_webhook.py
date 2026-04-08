@@ -306,19 +306,27 @@ async def book_appointment(request: Request):
     # Update the call record with caller name and duration (backfill from booking)
     if vapi_call_id and name and SUPABASE_URL and SUPABASE_SERVICE_KEY:
         try:
+            import asyncio
+            # Retry up to 5 times — call record may not exist yet (race condition with call-started webhook)
             async with httpx.AsyncClient() as client:
-                await client.patch(
-                    f"{SUPABASE_URL}/rest/v1/calls?vapi_call_id=eq.{vapi_call_id}",
-                    json={"caller_name": name},
-                    headers={
-                        "apikey": SUPABASE_SERVICE_KEY,
-                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
-                        "Content-Type": "application/json",
-                        "Prefer": "return=minimal",
-                    },
-                    timeout=10,
-                )
-                logger.info(f"Updated call record caller_name for vapi_call_id={vapi_call_id}")
+                for attempt in range(5):
+                    resp = await client.patch(
+                        f"{SUPABASE_URL}/rest/v1/calls?vapi_call_id=eq.{vapi_call_id}",
+                        json={"caller_name": name},
+                        headers={
+                            "apikey": SUPABASE_SERVICE_KEY,
+                            "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                            "Content-Type": "application/json",
+                            "Prefer": "return=representation",
+                        },
+                        timeout=10,
+                    )
+                    updated = resp.json() if resp.status_code == 200 else []
+                    if updated:
+                        logger.info(f"Updated call record caller_name for vapi_call_id={vapi_call_id} (attempt {attempt+1})")
+                        break
+                    logger.info(f"Call record not found yet, retrying ({attempt+1}/5)...")
+                    await asyncio.sleep(2)
             # Also fetch duration from Vapi API since durationSeconds is often null in webhook
             vapi_key = os.environ.get("VAPI_API_KEY", "")
             if vapi_key:
