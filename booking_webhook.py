@@ -159,7 +159,7 @@ class VapiBookingRequest(BaseModel):
 async def save_booking_to_supabase(
     shop_id: str, customer_name: str, customer_phone: str,
     vehicle: str, service: str, slot_dt, appointment_time: str,
-    calendar_link: str = ""
+    calendar_link: str = "", vapi_call_id: str = ""
 ) -> None:
     """Write booking to Supabase bookings table. Never raises — failures are logged only."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id:
