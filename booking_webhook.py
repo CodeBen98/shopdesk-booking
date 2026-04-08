@@ -166,7 +166,15 @@ async def save_booking_to_supabase(
         logger.warning("Supabase env vars not set — skipping DB write")
         return
     try:
-        appt_iso = slot_dt.isoformat() if slot_dt else appointment_time
+        # Ensure timezone-aware ISO format for correct storage
+        if slot_dt:
+            from zoneinfo import ZoneInfo
+            EASTERN = ZoneInfo("America/New_York")
+            if slot_dt.tzinfo is None:
+                slot_dt = slot_dt.replace(tzinfo=EASTERN)
+            appt_iso = slot_dt.isoformat()
+        else:
+            appt_iso = appointment_time
         payload = {
             "shop_id": shop_id,
             "customer_name": customer_name,
@@ -530,15 +538,18 @@ async def health():
 
 
 def _parse_appointment_time(time_str: str) -> Optional[datetime]:
-    """Parse a free-form appointment time string into a datetime."""
+    """Parse a free-form appointment time string into a datetime (Eastern time)."""
     import re
+    from zoneinfo import ZoneInfo
+
+    EASTERN = ZoneInfo("America/New_York")
 
     # Normalize: collapse spaces, handle am/pm variations
     s = time_str.strip()
     s = re.sub(r'\s+', ' ', s)
     s = re.sub(r'(\d)(am|pm)', r'\1 \2', s, flags=re.IGNORECASE)  # "10am" -> "10 am"
 
-    now = datetime.now()
+    now = datetime.now(tz=EASTERN)
     current_year = now.year
 
     # Handle day-of-week only formats like "Thursday at 10am" or "Thursday at noon"
