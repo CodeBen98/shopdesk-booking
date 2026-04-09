@@ -309,7 +309,12 @@ async def book_appointment(request: Request):
                 issue=issue,
                 slot_datetime=slot_dt,
             )
-            logger.info(f"Calendar event created: {cal_link}")
+            # Check if calendar failed after retries
+            if cal_link and cal_link.startswith("CALENDAR_FAILED:"):
+                logger.error(f"Calendar booking failed after retries, notifying owner")
+                cal_link = None  # Don't save failed link
+            else:
+                logger.info(f"Calendar event created: {cal_link}")
     except Exception as e:
         logger.error(f"Calendar booking failed: {e}")
 

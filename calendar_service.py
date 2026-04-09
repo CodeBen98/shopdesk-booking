@@ -311,13 +311,23 @@ class GoogleCalendarService:
             },
         }
 
-        try:
-            created = self._service.events().insert(
-                calendarId=CALENDAR_ID, body=event_body
-            ).execute()
-            link = created.get("htmlLink", "")
-            logger.info(f"Calendar event created: {link}")
-            return link
-        except Exception as e:
-            logger.error(f"Failed to create calendar event: {e}")
-            return slot_datetime.strftime("Appointment on %A, %B %d at %I:%M %p")
+        # Retry logic with exponential backoff
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                created = self._service.events().insert(
+                    calendarId=CALENDAR_ID, body=event_body
+                ).execute()
+                link = created.get("htmlLink", "")
+                logger.info(f"Calendar event created: {link}")
+                return link
+            except Exception as e:
+                wait_time = 2 ** attempt  # 1s, 2s, 4s
+                logger.warning(f"Calendar API attempt {attempt + 1}/{max_retries} failed: {e}")
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(wait_time)
+                else:
+                    logger.error(f"Calendar API failed after {max_retries} attempts: {e}")
+                    # Return a special marker so we can track calendar failures
+                    return f"CALENDAR_FAILED:{slot_datetime.strftime('%A, %B %d at %I:%M %p')}"
