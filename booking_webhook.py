@@ -199,6 +199,8 @@ async def save_booking_to_supabase(
             except Exception:
                 pass
 
+        from datetime import timezone
+        consent_ts = datetime.now(tz=timezone.utc).isoformat()
         payload = {
             "shop_id": shop_id,
             "customer_name": customer_name,
@@ -210,6 +212,10 @@ async def save_booking_to_supabase(
             "sms_sent": False,
             "notes": f"Calendar: {calendar_link}" if calendar_link else None,
             "call_id": call_uuid,
+            "sms_consent_given": True,
+            "sms_consent_timestamp": consent_ts,
+            "sms_consent_source": "phone_call_verbal",
+            "sms_consent_call_id": vapi_call_id or None,
         }
         async with httpx.AsyncClient() as client:
             resp = await client.post(
