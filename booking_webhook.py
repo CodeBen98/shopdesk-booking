@@ -80,6 +80,7 @@ async def get_shop_by_id(shop_id: str) -> dict:
 
 from calendar_service import GoogleCalendarService
 from sms_service import send_confirmation, send_owner_alert
+from monitoring import init_monitoring, record_monitoring_event, capture_and_record
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@email.shopdesk.site")
 
@@ -221,6 +222,8 @@ logging.basicConfig(
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+init_monitoring()
 
 app = FastAPI(title="ShopDesk Booking Webhook")
 
@@ -416,6 +419,15 @@ async def book_appointment(request: Request):
                 logger.info(f"Calendar event created: {cal_link}")
     except Exception as e:
         logger.error(f"Calendar booking failed: {e}")
+        await capture_and_record(
+            error=e,
+            source='booking-service',
+            event_type='calendar_booking_failed',
+            severity='critical',
+            shop_id=shop_id_resolved,
+            message='Calendar booking failed in booking webhook',
+            payload={'customer_name': name, 'service': issue},
+        )
 
     # Write booking to Supabase
     try:
@@ -432,6 +444,15 @@ async def book_appointment(request: Request):
         )
     except Exception as e:
         logger.error(f"Supabase write error: {e}")
+        await capture_and_record(
+            error=e,
+            source='booking-service',
+            event_type='booking_insert_failed',
+            severity='critical',
+            shop_id=shop_id_resolved,
+            message='Booking write to Supabase failed',
+            payload={'customer_name': name, 'service': issue},
+        )
 
     # Note: caller_name is backfilled via end-of-call-report webhook using booking.call_id
 
@@ -448,6 +469,14 @@ async def book_appointment(request: Request):
         logger.info(f"SMS confirmation sent to {phone}")
     except Exception as e:
         logger.error(f"SMS confirmation failed: {e}")
+        await record_monitoring_event(
+            source='booking-service',
+            event_type='sms_confirmation_failed',
+            severity='warning',
+            shop_id=shop_id_resolved,
+            message='Customer SMS confirmation failed',
+            payload={'customer_name': name, 'phone': phone, 'service': issue, 'error': str(e)},
+        )
 
     # Send owner alert
     try:
@@ -463,6 +492,15 @@ async def book_appointment(request: Request):
         logger.info("Owner alert sent")
     except Exception as e:
         logger.error(f"Owner alert failed: {e}")
+        await capture_and_record(
+            error=e,
+            source='booking-service',
+            event_type='owner_alert_failed',
+            severity='critical',
+            shop_id=shop_id_resolved,
+            message='Owner alert failed after booking',
+            payload={'customer_name': name, 'phone': phone, 'service': issue},
+        )
 
     # Send booking email to shop owner (always, regardless of calendar status)
     try:
@@ -481,6 +519,14 @@ async def book_appointment(request: Request):
             )
     except Exception as e:
         logger.error(f"Booking email failed: {e}")
+        await record_monitoring_event(
+            source='booking-service',
+            event_type='booking_email_failed',
+            severity='warning',
+            shop_id=shop_id_resolved,
+            message='Booking email failed',
+            payload={'customer_name': name, 'shop_email': shop_row.get('email'), 'error': str(e)},
+        )
 
     slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time
     confirmation_msg = (
