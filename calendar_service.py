@@ -85,10 +85,11 @@ def parse_shop_hours(hours_json: dict) -> dict:
 class GoogleCalendarService:
     """Wraps Google Calendar API with business-hours slot logic."""
 
-    def __init__(self, refresh_token: str = None, client_id: str = None, client_secret: str = None, shop_hours: dict = None):
+    def __init__(self, refresh_token: str = None, client_id: str = None, client_secret: str = None, shop_hours: dict = None, calendar_id: str = None):
         self._refresh_token = refresh_token
         self._client_id = client_id or os.getenv("GOOGLE_CLIENT_ID", "")
         self._client_secret = client_secret or os.getenv("GOOGLE_CLIENT_SECRET", "")
+        self._calendar_id = calendar_id or CALENDAR_ID
         # Use shop-specific hours if provided, otherwise fall back to defaults
         self._business_hours = parse_shop_hours(shop_hours) if shop_hours else BUSINESS_HOURS
         if not refresh_token:
@@ -184,7 +185,7 @@ class GoogleCalendarService:
                     day_start = datetime.combine(current_date, time(0, 0)).isoformat() + "Z"
                     day_end = datetime.combine(current_date, time(23, 59)).isoformat() + "Z"
                     result = service.events().list(
-                        calendarId=CALENDAR_ID,
+                        calendarId=self._calendar_id,
                         timeMin=day_start,
                         timeMax=day_end,
                         singleEvents=True,
@@ -316,7 +317,7 @@ class GoogleCalendarService:
         for attempt in range(max_retries):
             try:
                 created = self._service.events().insert(
-                    calendarId=CALENDAR_ID, body=event_body
+                    calendarId=self._calendar_id, body=event_body
                 ).execute()
                 link = created.get("htmlLink", "")
                 logger.info(f"Calendar event created: {link}")

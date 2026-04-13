@@ -22,8 +22,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "")
-SUPABASE_SERVICE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "")).strip().strip('"').strip("'")
+SUPABASE_SERVICE_KEY = (os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")).strip().strip('"').strip("'")
 # Log key type at startup for verification
 try:
     import base64 as _b64, json as _json
@@ -48,7 +48,7 @@ async def get_shop_by_assistant(assistant_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,email,google_refresh_token,google_calendar_id",
+                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,google_refresh_token,google_calendar_id",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -68,7 +68,7 @@ async def get_shop_by_id(shop_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,email,google_refresh_token,google_calendar_id",
+                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,google_refresh_token,google_calendar_id",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -83,6 +83,86 @@ from sms_service import send_confirmation, send_owner_alert
 RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
 FROM_EMAIL = os.getenv("FROM_EMAIL", "noreply@email.shopdesk.site")
 
+
+def normalize_phone(phone: str) -> str:
+    raw = (phone or "").strip()
+    if not raw:
+        return ""
+    digits = ''.join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10:
+        return f"+1{digits}"
+    if len(digits) == 11 and digits.startswith('1'):
+        return f"+{digits}"
+    if raw.startswith('+'):
+        return raw
+    return digits or raw
+
+
+async def sync_customer_from_booking(
+    shop_id: str,
+    customer_name: str,
+    customer_phone: str,
+    vehicle: str,
+    interaction_at: str,
+) -> None:
+    """Create or enrich a customer record from a successful booking."""
+    normalized_phone = normalize_phone(customer_phone)
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id or not normalized_phone:
+        return
+
+    try:
+        async with httpx.AsyncClient() as client:
+            lookup = await client.get(
+                f"{SUPABASE_URL}/rest/v1/customers?shop_id=eq.{shop_id}&phone=eq.{normalized_phone}&select=id,name,vehicle,last_visit,visit_count",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                timeout=10,
+            )
+            rows = lookup.json() if lookup.status_code == 200 else []
+
+            if rows:
+                existing = rows[0]
+                last_visit = existing.get("last_visit")
+                next_last_visit = interaction_at
+                if last_visit and interaction_at:
+                    next_last_visit = max(last_visit, interaction_at)
+
+                await client.patch(
+                    f"{SUPABASE_URL}/rest/v1/customers?id=eq.{existing['id']}",
+                    json={
+                        "name": customer_name or existing.get("name") or "Unknown Customer",
+                        "phone": normalized_phone,
+                        "vehicle": vehicle or existing.get("vehicle"),
+                        "last_visit": next_last_visit,
+                    },
+                    headers={
+                        "apikey": SUPABASE_SERVICE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=10,
+                )
+                return
+
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/customers",
+                json={
+                    "shop_id": shop_id,
+                    "name": customer_name or "Unknown Customer",
+                    "phone": normalized_phone,
+                    "vehicle": vehicle or None,
+                    "last_visit": interaction_at,
+                    "visit_count": 1,
+                },
+                headers={
+                    "apikey": SUPABASE_SERVICE_KEY,
+                    "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+    except Exception as e:
+        logger.error(f"sync_customer_from_booking error: {e}")
+
 async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
                               customer_phone: str, vehicle: str, service: str,
                               appointment_time: str, calendar_link: str = "") -> None:
@@ -91,6 +171,10 @@ async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
         logger.warning("Email not configured — skipping booking email")
         return
     try:
+        calendar_hint_html = ""
+        if not calendar_link:
+            calendar_hint_html = "<p style='margin-top:16px;font-size:13px;color:#6b7280'>💡 <a href='https://app.shopdesk.site/dashboard/settings' style='color:#0F7695'>Connect Google Calendar</a> to automatically add bookings.</p>"
+
         html = f"""<div style="font-family:Inter,sans-serif;max-width:560px;margin:0 auto;padding:24px">
 <div style="background:#0b141e;padding:16px 24px;border-radius:8px 8px 0 0;border-bottom:3px solid #0F7695">
   <span style="font-size:18px;font-weight:700;color:#f4f5f7">ShopDesk</span>
@@ -108,7 +192,7 @@ async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
   <div style="margin-top:24px">
     <a href="https://app.shopdesk.site/dashboard/bookings" style="background:#0F7695;color:#fff;padding:12px 24px;border-radius:8px;text-decoration:none;font-weight:600;font-size:14px;display:inline-block">View in Dashboard</a>
   </div>
-  {"<p style='margin-top:16px;font-size:13px;color:#6b7280'>💡 <a href=\"https://app.shopdesk.site/dashboard/settings\" style=\"color:#0F7695\">Connect Google Calendar</a> to automatically add bookings.</p>" if not calendar_link else ""}
+  {calendar_hint_html}
 </div>
 </div>"""
 
@@ -201,10 +285,11 @@ async def save_booking_to_supabase(
 
         from datetime import timezone
         consent_ts = datetime.now(tz=timezone.utc).isoformat()
+        normalized_phone = normalize_phone(customer_phone)
         payload = {
             "shop_id": shop_id,
             "customer_name": customer_name,
-            "customer_phone": customer_phone,
+            "customer_phone": normalized_phone,
             "vehicle": vehicle or None,
             "service": service or None,
             "appointment_at": appt_iso,
@@ -231,6 +316,13 @@ async def save_booking_to_supabase(
             )
             if resp.status_code in (200, 201):
                 logger.info(f"Booking saved to Supabase for {customer_name}")
+                await sync_customer_from_booking(
+                    shop_id=shop_id,
+                    customer_name=customer_name,
+                    customer_phone=normalized_phone,
+                    vehicle=vehicle or "",
+                    interaction_at=appt_iso,
+                )
             else:
                 logger.error(f"Supabase booking insert failed: {resp.status_code} {resp.text[:200]}")
     except Exception as e:
@@ -262,7 +354,7 @@ async def book_appointment(request: Request):
             args = raw_args
         vehicle_str = f"{args.get('vehicle_year','')} {args.get('vehicle_make','')} {args.get('vehicle_model','')}".strip()
         name = args.get("customer_name", "")
-        phone = args.get("customer_phone", "")
+        phone = normalize_phone(args.get("customer_phone", ""))
         issue = args.get("service", "")
         appointment_time = args.get("appointment_time", "")
         assistant_id = args.get("assistant_id", "")
@@ -272,7 +364,7 @@ async def book_appointment(request: Request):
         vapi_call_id = ""
         # Legacy ElevenLabs format
         name = body.get("name", "")
-        phone = body.get("phone", "")
+        phone = normalize_phone(body.get("phone", ""))
         vehicle_str = body.get("vehicle", "")
         issue = body.get("issue", "")
         appointment_time = body.get("appointment_time", "")
@@ -307,6 +399,7 @@ async def book_appointment(request: Request):
                 client_id=google_client_id,
                 client_secret=google_client_secret,
                 shop_hours=shop_row.get("hours"),
+                calendar_id=shop_calendar_id,
             )
             cal_link = await cal.book_appointment(
                 name=name,
@@ -349,8 +442,8 @@ async def book_appointment(request: Request):
             name=name,
             vehicle=vehicle_str or "your vehicle",
             slot=slot_dt or appointment_time,
-            shop_name=SHOP_NAME,
-            shop_address=SHOP_ADDRESS,
+            shop_name=shop_row.get("name") or SHOP_NAME,
+            shop_address=shop_row.get("address") or SHOP_ADDRESS,
         )
         logger.info(f"SMS confirmation sent to {phone}")
     except Exception as e:
@@ -364,6 +457,8 @@ async def book_appointment(request: Request):
             "vehicle": vehicle_str,
             "issue": issue,
             "slot": appointment_time,
+            "owner_phone": shop_row.get("owner_phone"),
+            "shop_name": shop_row.get("name") or SHOP_NAME,
         })
         logger.info("Owner alert sent")
     except Exception as e:

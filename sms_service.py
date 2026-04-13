@@ -96,19 +96,21 @@ async def send_owner_alert(booking_info: dict) -> str:
     year = booking_info.get("year", "")
     make = booking_info.get("make", "")
     model = booking_info.get("model", "")
-    vehicle = f"{year} {make} {model}".strip() or "Unknown vehicle"
+    vehicle = booking_info.get("vehicle") or f"{year} {make} {model}".strip() or "Unknown vehicle"
     issue = booking_info.get("issue", "Service")
     slot_str = _fmt_slot(booking_info.get("slot"))
+    owner_phone = booking_info.get("owner_phone") or OWNER_PHONE
+    shop_name = booking_info.get("shop_name") or SHOP_NAME
 
     body = (
-        f"NEW APPOINTMENT — {SHOP_NAME}\n"
+        f"NEW APPOINTMENT — {shop_name}\n"
         f"Customer: {name} | {phone}\n"
         f"Vehicle: {vehicle}\n"
         f"Service: {issue}\n"
         f"Time: {slot_str}\n"
         f"— ShopDesk AI"
     )
-    return await _send_sms(OWNER_PHONE, body)
+    return await _send_sms(owner_phone, body)
 
 
 async def send_emergency_alert(caller_info: dict) -> str:
@@ -116,12 +118,14 @@ async def send_emergency_alert(caller_info: dict) -> str:
     caller = caller_info.get("caller", "Unknown")
     message = caller_info.get("message", "")
     call_sid = caller_info.get("call_sid", "")
+    owner_phone = caller_info.get("owner_phone") or OWNER_PHONE
+    shop_name = caller_info.get("shop_name") or SHOP_NAME
 
     body = (
-        f"EMERGENCY ALERT — {SHOP_NAME}\n"
+        f"EMERGENCY ALERT — {shop_name}\n"
         f"Caller: {caller}\n"
         f'Reported: "{message}"\n'
         f"Call SID: {call_sid}\n"
         f"— ShopDesk AI (call in progress)"
     )
-    return await _send_sms(OWNER_PHONE, body)
+    return await _send_sms(owner_phone, body)
