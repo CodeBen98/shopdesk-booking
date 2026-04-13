@@ -1,7 +1,7 @@
 """
-booking_webhook.py — ShopDesk booking tool webhook for ElevenLabs Conversational AI.
+booking_webhook.py — ShopDesk booking tool webhook for Vapi.
 
-ElevenLabs calls POST /book when the AI agent wants to book an appointment.
+Vapi calls POST /book when the AI agent wants to book an appointment.
 Returns a confirmation string the AI reads back to the caller.
 
 Run with: uvicorn booking_webhook:app --host 0.0.0.0 --port 8000
