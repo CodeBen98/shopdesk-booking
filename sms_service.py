@@ -84,7 +84,8 @@ async def send_confirmation(
         f"Date: {slot_str}\n"
         f"Vehicle: {vehicle}\n"
         f"Address: {shop_address}\n"
-        f"Questions? Call us at {TWILIO_PHONE}. See you soon!"
+        f"Questions? Call us at {TWILIO_PHONE}. See you soon!\n"
+        f"Reply STOP to opt out."
     )
     return await _send_sms(to_phone, body)
 
@@ -108,7 +109,8 @@ async def send_owner_alert(booking_info: dict) -> str:
         f"Vehicle: {vehicle}\n"
         f"Service: {issue}\n"
         f"Time: {slot_str}\n"
-        f"— ShopDesk AI"
+        f"— ShopDesk AI\n"
+        f"Reply STOP to opt out."
     )
     return await _send_sms(owner_phone, body)
 
@@ -126,6 +128,7 @@ async def send_emergency_alert(caller_info: dict) -> str:
         f"Caller: {caller}\n"
         f'Reported: "{message}"\n'
         f"Call SID: {call_sid}\n"
-        f"— ShopDesk AI (call in progress)"
+        f"— ShopDesk AI (call in progress)\n"
+        f"Reply STOP to opt out."
     )
     return await _send_sms(owner_phone, body)
