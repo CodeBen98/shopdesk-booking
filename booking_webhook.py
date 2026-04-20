@@ -10,13 +10,17 @@ Expose with: ngrok http 8000
 
 import os
 import logging
+import json
+import hmac
+import hashlib
+import base64
 from datetime import datetime
 
 import uvicorn
 import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from typing import Optional
+from typing import Optional, Tuple
 from pydantic import BaseModel
 from dotenv import load_dotenv
 
@@ -24,42 +28,50 @@ load_dotenv()
 
 SUPABASE_URL = (os.getenv("SUPABASE_URL", "") or os.getenv("NEXT_PUBLIC_SUPABASE_URL", "")).strip().strip('"').strip("'")
 SUPABASE_SERVICE_KEY = (os.getenv("SUPABASE_SERVICE_KEY", "") or os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")).strip().strip('"').strip("'")
-# Log key type at startup for verification
+BOOKING_WEBHOOK_SECRET = (os.getenv("BOOKING_WEBHOOK_SECRET", "") or os.getenv("VAPI_WEBHOOK_SECRET", "")).strip()
+# ALLOW_UNSAFE_SHOP_QUERY_FALLBACK intentionally removed.
+# DEFAULT_SHOP_ID intentionally removed.
+# No global shop fallbacks exist in this service.
+
+# Log only key role metadata (never key fragments).
 try:
-    import base64 as _b64, json as _json
     _payload = SUPABASE_SERVICE_KEY.split('.')[1] if SUPABASE_SERVICE_KEY else ''
     _payload += '=' * (4 - len(_payload) % 4)
-    _key_role = _json.loads(_b64.b64decode(_payload)).get('role', 'unknown') if _payload else 'missing'
+    _key_role = json.loads(base64.b64decode(_payload)).get('role', 'unknown') if _payload else 'missing'
 except Exception:
     _key_role = 'parse_error'
-print(f"[STARTUP] SUPABASE key role: {_key_role} (len={len(SUPABASE_SERVICE_KEY)}) start={SUPABASE_SERVICE_KEY[:30] if SUPABASE_SERVICE_KEY else 'EMPTY'}")
-DEFAULT_SHOP_ID = os.getenv("DEFAULT_SHOP_ID", "")  # fallback only
+print(f"[STARTUP] SUPABASE key role: {_key_role}")
 
-_shop_cache: dict = {}  # simple in-memory cache: assistant_id -> shop row
+# Per-process shop cache: assistant_id -> (shop_row, cached_at_timestamp)
+# TTL = 5 min so reprovisions take effect without a restart.
+_shop_cache: dict = {}
+_SHOP_CACHE_TTL = 300  # seconds
 
 async def get_shop_by_assistant(assistant_id: str) -> dict:
     """Look up shop from Supabase by Vapi assistant ID. Returns shop dict or empty dict."""
+    import time
     if not assistant_id:
-        return await get_shop_by_id(DEFAULT_SHOP_ID)
-    if assistant_id in _shop_cache:
-        return _shop_cache[assistant_id]
+        return {}
+    cached = _shop_cache.get(assistant_id)
+    if cached and (time.time() - cached[1]) < _SHOP_CACHE_TTL:
+        return cached[0]
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
         return {}
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,google_refresh_token,google_calendar_id",
+                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
             if resp.status_code == 200 and resp.json():
+                import time
                 shop = resp.json()[0]
-                _shop_cache[assistant_id] = shop
+                _shop_cache[assistant_id] = (shop, time.time())
                 return shop
     except Exception as e:
         logger.error(f"get_shop_by_assistant error: {e}")
-    # Fall back to default shop ID
-    return await get_shop_by_id(DEFAULT_SHOP_ID)
+    return {}
 
 async def get_shop_by_id(shop_id: str) -> dict:
     """Look up shop by ID."""
@@ -68,7 +80,7 @@ async def get_shop_by_id(shop_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,google_refresh_token,google_calendar_id",
+                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -133,6 +145,7 @@ async def sync_customer_from_booking(
                         "phone": normalized_phone,
                         "vehicle": vehicle or existing.get("vehicle"),
                         "last_visit": next_last_visit,
+                        "visit_count": max((existing.get("visit_count") or 0) + 1, 1),
                     },
                     headers={
                         "apikey": SUPABASE_SERVICE_KEY,
@@ -224,10 +237,18 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="ShopDesk Booking Webhook")
 
-SHOP_NAME = os.getenv("SHOP_NAME", "Mike's Auto Repair")
-SHOP_ADDRESS = os.getenv("SHOP_ADDRESS", "1234 Orange Ave, Orlando, FL 32801")
-SHOP_PHONE = os.getenv("SHOP_PHONE", "(407) 555-0123")
-CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
+
+class WebhookAuthError(Exception):
+    pass
+
+
+@app.exception_handler(WebhookAuthError)
+async def webhook_auth_exception_handler(_request: Request, exc: WebhookAuthError):
+    return JSONResponse({"error": str(exc)}, status_code=401)
+
+# No global shop name/address/phone fallbacks.
+# All shop data must be resolved per-request from Supabase.
+# Fallbacks to hardcoded values risk cross-shop data leakage.
 
 
 class BookingRequest(BaseModel):
@@ -247,6 +268,243 @@ class VapiBookingRequest(BaseModel):
     vehicle_model: Optional[str] = ""
     service: str
     appointment_time: str
+
+def _safe_equal(a: str, b: str) -> bool:
+    return hmac.compare_digest(a.encode('utf-8'), b.encode('utf-8'))
+
+
+def _verify_webhook_auth(request: Request, raw_body: bytes) -> bool:
+    if not BOOKING_WEBHOOK_SECRET:
+        return os.getenv("NODE_ENV", "development") != "production"
+
+    secret = BOOKING_WEBHOOK_SECRET
+
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer ") and _safe_equal(auth_header[7:].strip(), secret):
+        return True
+
+    token_header = request.headers.get("x-booking-webhook-token", "")
+    if token_header and _safe_equal(token_header.strip(), secret):
+        return True
+
+    sig_header = (
+        request.headers.get("x-vapi-signature")
+        or request.headers.get("x-vapi-signature-256")
+        or request.headers.get("vapi-signature")
+        or request.headers.get("x-signature")
+        or ""
+    )
+    if not sig_header:
+        return False
+
+    expected_hex = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    expected_b64 = base64.b64encode(hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).digest()).decode("utf-8")
+    expected = {expected_hex, f"sha256={expected_hex}", expected_b64, f"sha256={expected_b64}"}
+
+    provided = {part.strip() for part in sig_header.split(',') if part.strip()}
+    return any(any(_safe_equal(p, e) for e in expected) for p in provided)
+
+
+def _error_response(is_vapi: bool, tool_call_id: str, message: str, status_code: int = 400):
+    if is_vapi:
+        return JSONResponse({
+            "results": [{
+                "toolCallId": tool_call_id,
+                "result": message,
+            }]
+        }, status_code=status_code)
+    return JSONResponse({"error": message}, status_code=status_code)
+
+
+async def _resolve_shop(assistant_id: str, query_shop_id: str) -> Tuple[dict, str]:
+    # Primary: use shop_id from URL — reliable, no hallucination risk
+    if query_shop_id:
+        shop_row = await get_shop_by_id(query_shop_id)
+        if shop_row:
+            return shop_row, ""
+        return {}, f"Shop not found for ID: {query_shop_id}"
+
+    # Fallback: assistant_id from AI (less reliable — AI can hallucinate this)
+    if assistant_id:
+        shop_row = await get_shop_by_assistant(assistant_id)
+        if shop_row:
+            return shop_row, ""
+        return {}, "Could not resolve shop from assistant ID."
+
+    # No DEFAULT_SHOP_ID fallback in production.
+    # Every request must carry a valid shop_id in the URL.
+    return {}, "Missing or unresolvable shop context."
+
+
+def _extract_payload(body: dict) -> Tuple[bool, str, dict, str, str, str, str, str, str, str]:
+    tool_calls = body.get("message", {}).get("toolCalls", [])
+    is_vapi = bool(tool_calls)
+
+    if is_vapi:
+        tc = tool_calls[0]
+        tool_call_id = tc.get("id", "")
+        raw_args = tc.get("function", {}).get("arguments", "{}")
+        args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+
+        vehicle_str = f"{args.get('vehicle_year','')} {args.get('vehicle_make','')} {args.get('vehicle_model','')}".strip()
+        return (
+            True,
+            tool_call_id,
+            args,
+            args.get("customer_name", ""),
+            normalize_phone(args.get("customer_phone", "")),
+            vehicle_str,
+            args.get("service", ""),
+            args.get("appointment_time", ""),
+            args.get("assistant_id", ""),
+            body.get("message", {}).get("call", {}).get("id", ""),
+        )
+
+    return (
+        False,
+        "",
+        body,
+        body.get("name", ""),
+        normalize_phone(body.get("phone", "")),
+        body.get("vehicle", ""),
+        body.get("issue", ""),
+        body.get("appointment_time", ""),
+        body.get("assistant_id", ""),
+        body.get("call_id", ""),
+    )
+
+
+async def _handle_booking_request(body: dict, query_shop_id: str = ""):
+    (
+        is_vapi,
+        tool_call_id,
+        _args,
+        name,
+        phone,
+        vehicle_str,
+        issue,
+        appointment_time,
+        assistant_id,
+        vapi_call_id,
+    ) = _extract_payload(body)
+
+    if not name or not phone or not issue or not appointment_time:
+        return _error_response(is_vapi, tool_call_id, "Missing required booking fields.")
+
+    slot_dt = _parse_appointment_time(appointment_time)
+
+    shop_row, shop_error = await _resolve_shop(assistant_id, query_shop_id)
+    if not shop_row:
+        return _error_response(is_vapi, tool_call_id, shop_error)
+
+    shop_id_resolved = shop_row.get("id")
+
+    cal_link = None
+    try:
+        shop_refresh_token = shop_row.get("google_refresh_token")
+        shop_calendar_id = shop_row.get("google_calendar_id") or "primary"
+
+        if shop_refresh_token:
+            cal = GoogleCalendarService(
+                refresh_token=shop_refresh_token,
+                client_id=os.getenv("GOOGLE_CLIENT_ID", ""),
+                client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
+                shop_hours=shop_row.get("hours"),
+                calendar_id=shop_calendar_id,
+            )
+            cal_link = await cal.book_appointment(
+                name=name,
+                phone=phone,
+                vehicle=vehicle_str or "Vehicle TBD",
+                issue=issue,
+                slot_datetime=slot_dt,
+            )
+            if cal_link and cal_link.startswith("CALENDAR_FAILED:"):
+                cal_link = None
+    except Exception as e:
+        logger.error(f"Calendar booking failed: {e}")
+
+    try:
+        await save_booking_to_supabase(
+            shop_id=shop_id_resolved,
+            customer_name=name,
+            customer_phone=phone,
+            vehicle=vehicle_str or "",
+            service=issue,
+            slot_dt=slot_dt,
+            appointment_time=appointment_time,
+            calendar_link=cal_link or "",
+            vapi_call_id=vapi_call_id,
+        )
+    except Exception as e:
+        logger.error(f"Supabase write error: {e}")
+
+    try:
+        await send_confirmation(
+            to_phone=phone,
+            name=name,
+            vehicle=vehicle_str or "your vehicle",
+            slot=slot_dt or appointment_time,
+            shop_name=shop_row.get("name") or "",
+            shop_address=shop_row.get("address") or "",
+            from_phone=shop_row.get("twilio_number") or "",
+        )
+    except Exception as e:
+        logger.error(f"SMS confirmation failed: {e}")
+
+    try:
+        await send_owner_alert({
+            "name": name,
+            "phone": phone,
+            "vehicle": vehicle_str,
+            "issue": issue,
+            "slot": appointment_time,
+            "owner_phone": shop_row.get("owner_phone") or "",
+            "shop_name": shop_row.get("name") or "",
+            "from_phone": shop_row.get("twilio_number") or "",
+        })
+    except Exception as e:
+        logger.error(f"Owner alert failed: {e}")
+
+    try:
+        shop_email = shop_row.get("email")
+        if shop_email:
+            await send_booking_email(
+                to_email=shop_email,
+                shop_name=shop_row.get("name") or "",
+                customer_name=name,
+                customer_phone=phone,
+                vehicle=vehicle_str or "Vehicle TBD",
+                service=issue,
+                appointment_time=slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time,
+                calendar_link=cal_link or "",
+            )
+    except Exception as e:
+        logger.error(f"Booking email failed: {e}")
+
+    slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time
+    confirmation_msg = (
+        f"Booked. {name} confirmed for {issue} on {slot_display}. "
+        f"Confirmation text sent to {phone}."
+    )
+
+    if is_vapi:
+        return JSONResponse({
+            "results": [{
+                "toolCallId": tool_call_id,
+                "result": confirmation_msg,
+            }]
+        })
+
+    return JSONResponse({
+        "confirmation": (
+            f"Perfect, you're all set. We've booked {name} for {issue} "
+            f"on {slot_display}. A confirmation text is on its way to {phone}. "
+            f"We look forward to seeing you!"
+        ),
+        "success": True,
+        "calendar_link": cal_link or "",
+    })
 
 
 async def save_booking_to_supabase(
@@ -331,295 +589,41 @@ async def save_booking_to_supabase(
 
 @app.post("/book")
 async def book_appointment(request: Request):
-    """
-    Universal booking endpoint — handles both Vapi and legacy ElevenLabs formats.
-    Vapi sends: {"message": {"toolCalls": [{"id": "...", "function": {"name": "...", "arguments": "{...}"}}]}}
-    Legacy sends: {"name": "...", "phone": "...", "vehicle": "...", "issue": "...", "appointment_time": "..."}
-    """
-    body = await request.json()
+    raw_body = await request.body()
+    if not _verify_webhook_auth(request, raw_body):
+        raise WebhookAuthError("Unauthorized webhook request")
+
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+
     logger.info(f"Booking request body: {str(body)[:300]}")
-
-    # Detect Vapi format
-    tool_calls = body.get("message", {}).get("toolCalls", [])
-    is_vapi = bool(tool_calls)
-
-    if is_vapi:
-        tc = tool_calls[0]
-        tool_call_id = tc.get("id", "")
-        raw_args = tc.get("function", {}).get("arguments", "{}")
-        if isinstance(raw_args, str):
-            import json as _json
-            args = _json.loads(raw_args)
-        else:
-            args = raw_args
-        vehicle_str = f"{args.get('vehicle_year','')} {args.get('vehicle_make','')} {args.get('vehicle_model','')}".strip()
-        name = args.get("customer_name", "")
-        phone = normalize_phone(args.get("customer_phone", ""))
-        issue = args.get("service", "")
-        appointment_time = args.get("appointment_time", "")
-        assistant_id = args.get("assistant_id", "")
-        vapi_call_id = body.get("message", {}).get("call", {}).get("id", "")
-    else:
-        assistant_id = body.get("assistant_id", "")
-        vapi_call_id = ""
-        # Legacy ElevenLabs format
-        name = body.get("name", "")
-        phone = normalize_phone(body.get("phone", ""))
-        vehicle_str = body.get("vehicle", "")
-        issue = body.get("issue", "")
-        appointment_time = body.get("appointment_time", "")
-        tool_call_id = None
-
-    slot_dt = _parse_appointment_time(appointment_time)
-
-    # Look up shop — prefer query param shop_id (injected by provision), fallback to assistant_id
     query_shop_id = request.query_params.get("shop_id", "")
-    if query_shop_id:
-        shop_row = await get_shop_by_id(query_shop_id)
-    else:
-        shop_row = await get_shop_by_assistant(assistant_id)
-    shop_id_resolved = shop_row.get("id") or DEFAULT_SHOP_ID
-
-    # Book calendar event — use per-shop refresh token if available
-    cal_link = None
-    try:
-        shop_refresh_token = shop_row.get("google_refresh_token")
-        shop_calendar_id = shop_row.get("google_calendar_id") or CALENDAR_ID
-
-        if not shop_refresh_token:
-            # No calendar connected — skip calendar booking, notify owner via email instead
-            logger.info("No Google refresh token for shop — skipping calendar, owner will be notified via email")
-            cal_link = None
-        else:
-            # Use per-shop OAuth token
-            google_client_id = os.getenv("GOOGLE_CLIENT_ID", "")
-            google_client_secret = os.getenv("GOOGLE_CLIENT_SECRET", "")
-            cal = GoogleCalendarService(
-                refresh_token=shop_refresh_token,
-                client_id=google_client_id,
-                client_secret=google_client_secret,
-                shop_hours=shop_row.get("hours"),
-                calendar_id=shop_calendar_id,
-            )
-            cal_link = await cal.book_appointment(
-                name=name,
-                phone=phone,
-                vehicle=vehicle_str or "Vehicle TBD",
-                issue=issue,
-                slot_datetime=slot_dt,
-            )
-            # Check if calendar failed after retries
-            if cal_link and cal_link.startswith("CALENDAR_FAILED:"):
-                logger.error(f"Calendar booking failed after retries, notifying owner")
-                cal_link = None  # Don't save failed link
-            else:
-                logger.info(f"Calendar event created: {cal_link}")
-    except Exception as e:
-        logger.error(f"Calendar booking failed: {e}")
-
-    # Write booking to Supabase
-    try:
-        await save_booking_to_supabase(
-            shop_id=shop_id_resolved,
-            customer_name=name,
-            customer_phone=phone,
-            vehicle=vehicle_str or "",
-            service=issue,
-            slot_dt=slot_dt,
-            appointment_time=appointment_time,
-            calendar_link=cal_link or "",
-            vapi_call_id=vapi_call_id,
-        )
-    except Exception as e:
-        logger.error(f"Supabase write error: {e}")
-
-    # Note: caller_name is backfilled via end-of-call-report webhook using booking.call_id
-
-    # Send customer SMS confirmation
-    try:
-        await send_confirmation(
-            to_phone=phone,
-            name=name,
-            vehicle=vehicle_str or "your vehicle",
-            slot=slot_dt or appointment_time,
-            shop_name=shop_row.get("name") or SHOP_NAME,
-            shop_address=shop_row.get("address") or SHOP_ADDRESS,
-        )
-        logger.info(f"SMS confirmation sent to {phone}")
-    except Exception as e:
-        logger.error(f"SMS confirmation failed: {e}")
-
-    # Send owner alert
-    try:
-        await send_owner_alert({
-            "name": name,
-            "phone": phone,
-            "vehicle": vehicle_str,
-            "issue": issue,
-            "slot": appointment_time,
-            "owner_phone": shop_row.get("owner_phone"),
-            "shop_name": shop_row.get("name") or SHOP_NAME,
-        })
-        logger.info("Owner alert sent")
-    except Exception as e:
-        logger.error(f"Owner alert failed: {e}")
-
-    # Send booking email to shop owner (always, regardless of calendar status)
-    try:
-        shop_email = shop_row.get("email")
-        shop_name_local = shop_row.get("name") or SHOP_NAME
-        if shop_email:
-            await send_booking_email(
-                to_email=shop_email,
-                shop_name=shop_name_local,
-                customer_name=name,
-                customer_phone=phone,
-                vehicle=vehicle_str or "Vehicle TBD",
-                service=issue,
-                appointment_time=slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time,
-                calendar_link=cal_link or "",
-            )
-    except Exception as e:
-        logger.error(f"Booking email failed: {e}")
-
-    slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time
-    confirmation_msg = (
-        f"Booked. {name} confirmed for {issue} on {slot_display}. "
-        f"Confirmation text sent to {phone}."
-    )
-
-    # Return correct format based on caller
-    if is_vapi:
-        return JSONResponse({
-            "results": [{
-                "toolCallId": tool_call_id,
-                "result": confirmation_msg
-            }]
-        })
-    else:
-        return JSONResponse({
-            "confirmation": (
-                f"Perfect, you're all set. We've booked {name} for {issue} "
-                f"on {slot_display}. A confirmation text is on its way to {phone}. "
-                f"We look forward to seeing you!"
-            ),
-            "success": True,
-            "calendar_link": cal_link or "",
-        })
+    return await _handle_booking_request(body, query_shop_id)
 
 
 @app.post("/vapi/book")
-async def vapi_book_appointment(payload: dict):
-    """
-    Called by Vapi when the AI tool 'bookAppointment' is triggered.
-    Vapi sends: {"message": {"toolCalls": [{"function": {"arguments": {...}}}]}}
-    """
+async def vapi_book_appointment(request: Request):
+    raw_body = await request.body()
+    if not _verify_webhook_auth(request, raw_body):
+        raise WebhookAuthError("Unauthorized webhook request")
+
     try:
-        # Extract arguments from Vapi tool call structure
-        tool_calls = payload.get("message", {}).get("toolCalls", [])
-        if not tool_calls:
-            # Direct call with flat args (fallback)
-            args = payload
-        else:
-            args = tool_calls[0].get("function", {}).get("arguments", {})
-            if isinstance(args, str):
-                import json as _json
-                args = _json.loads(args)
+        body = json.loads(raw_body.decode("utf-8"))
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
 
-        req = VapiBookingRequest(
-            customer_name=args.get("customer_name", ""),
-            customer_phone=args.get("customer_phone", ""),
-            vehicle_year=args.get("vehicle_year", ""),
-            vehicle_make=args.get("vehicle_make", ""),
-            vehicle_model=args.get("vehicle_model", ""),
-            service=args.get("service", ""),
-            appointment_time=args.get("appointment_time", "")
-        )
-    except Exception as e:
-        logger.error(f"Failed to parse Vapi booking request: {e} — payload: {payload}")
-        return JSONResponse({"result": "I had trouble processing that booking. Let me take your number and have someone call you right back."})
-
-    vehicle_str = f"{req.vehicle_year} {req.vehicle_make} {req.vehicle_model}".strip()
-    slot_dt = _parse_appointment_time(req.appointment_time)
-
-    # Book calendar event
-    cal_link = None
-    try:
-        cal = GoogleCalendarService()
-        cal_link = await cal.book_appointment(
-            name=req.customer_name,
-            phone=req.customer_phone,
-            vehicle=vehicle_str or "Vehicle TBD",
-            issue=req.service,
-            slot_datetime=slot_dt,
-        )
-        logger.info(f"Vapi booking — calendar event created: {cal_link}")
-    except Exception as e:
-        logger.error(f"Vapi booking — calendar failed: {e}")
-
-    # Send SMS confirmation
-    try:
-        await send_confirmation(
-            to_phone=req.customer_phone,
-            name=req.customer_name,
-            vehicle=vehicle_str or "your vehicle",
-            slot=slot_dt or req.appointment_time,
-            shop_name=SHOP_NAME,
-            shop_address=SHOP_ADDRESS,
-        )
-    except Exception as e:
-        logger.error(f"Vapi booking — SMS failed: {e}")
-
-    # Owner alert
-    try:
-        await send_owner_alert({
-            "name": req.customer_name,
-            "phone": req.customer_phone,
-            "vehicle": vehicle_str,
-            "issue": req.service,
-            "slot": req.appointment_time,
-        })
-    except Exception as e:
-        logger.error(f"Vapi booking — owner alert failed: {e}")
-
-    slot_display = slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else req.appointment_time
-    result_msg = (
-        f"Booked. {req.customer_name} is confirmed for {req.service} on {slot_display}. "
-        f"Confirmation text sent to {req.customer_phone}."
-    )
-
-    # Vapi expects {"results": [{"toolCallId": ..., "result": ...}]}
-    tool_call_id = tool_calls[0].get("id", "") if tool_calls else ""
-    return JSONResponse({
-        "results": [{
-            "toolCallId": tool_call_id,
-            "result": result_msg
-        }]
-    })
+    query_shop_id = request.query_params.get("shop_id", "")
+    return await _handle_booking_request(body, query_shop_id)
 
 
-@app.api_route("/slots", methods=["GET", "POST"])
-async def get_slots(request=None):
-    """
-    Called by ElevenLabs to get available appointment slots.
-    Returns the next 6 available slots as human-readable strings.
-    """
-    try:
-        cal = GoogleCalendarService()
-        slots = await cal.get_available_slots(num_days=3)
-        slot_strings = [
-            dt.strftime("%A, %B %d at %I:%M %p")
-            for dt in slots[:6]
-        ]
-        return JSONResponse({"slots": slot_strings})
-    except Exception as e:
-        logger.error(f"Failed to fetch slots: {e}")
-        return JSONResponse({"slots": [], "error": str(e)})
+# /slots removed — single-tenant legacy endpoint with no shop context.
 
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "shop": SHOP_NAME}
+    return {"status": "ok", "service": "shopdesk-booking"}
 
 
 def _parse_appointment_time(time_str: str) -> Optional[datetime]:

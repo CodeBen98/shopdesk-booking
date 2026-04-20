@@ -19,7 +19,11 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 CALENDAR_ID = os.getenv("GOOGLE_CALENDAR_ID", "primary")
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+# Use calendar.events scope — matches what the OAuth flow grants during onboarding.
+# This scope allows full read/write of calendar events, which is all we need.
+# Do NOT use the broader 'calendar' scope — it won't match the granted token
+# and will cause invalid_scope errors on every booking.
+SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 APPOINTMENT_DURATION_MINUTES = 30
 TIMEZONE = "America/New_York"
 
@@ -113,9 +117,13 @@ class GoogleCalendarService:
                 token_uri="https://oauth2.googleapis.com/token",
                 client_id=self._client_id,
                 client_secret=self._client_secret,
-                scopes=SCOPES,
+                scopes=SCOPES,  # Must match the scope granted during OAuth onboarding
             )
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                logger.error(f"Google token refresh failed: {e}. Shop may need to reconnect calendar.")
+                raise
             return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
         # Fall back to file-based credentials (shared/system credentials)
@@ -167,7 +175,7 @@ class GoogleCalendarService:
             return self._fallback_slots(num_days)
 
         slots: List[datetime] = []
-        now = datetime.now()
+        now = datetime.now(tz=SHOP_TIMEZONE)
         current_date = now.date()
         days_scanned = 0
         business_days_found = 0
@@ -182,8 +190,8 @@ class GoogleCalendarService:
 
                 # Fetch existing events for this day
                 try:
-                    day_start = datetime.combine(current_date, time(0, 0)).isoformat() + "Z"
-                    day_end = datetime.combine(current_date, time(23, 59)).isoformat() + "Z"
+                    day_start = datetime.combine(current_date, time(0, 0), tzinfo=SHOP_TIMEZONE).isoformat()
+                    day_end = datetime.combine(current_date, time(23, 59), tzinfo=SHOP_TIMEZONE).isoformat()
                     result = service.events().list(
                         calendarId=self._calendar_id,
                         timeMin=day_start,
@@ -197,7 +205,7 @@ class GoogleCalendarService:
                     existing = []
 
                 # Walk 30-min slots during business hours
-                slot_dt = datetime.combine(current_date, time(open_hour, 0))
+                slot_dt = datetime.combine(current_date, time(open_hour, 0), tzinfo=SHOP_TIMEZONE)
 
                 # Skip past times on today (require at least 2h notice)
                 if current_date == now.date():
@@ -209,9 +217,10 @@ class GoogleCalendarService:
                     min_start = min_start.replace(second=0, microsecond=0)
                     slot_dt = max(slot_dt, min_start)
 
+                day_close = datetime.combine(current_date, time(close_hour, 0), tzinfo=SHOP_TIMEZONE)
                 while (slot_dt.hour < close_hour or
                        (slot_dt.hour == close_hour and slot_dt.minute == 0)) and \
-                      slot_dt < datetime.combine(current_date, time(close_hour, 0)):
+                      slot_dt < day_close:
                     slot_end = slot_dt + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
                     if not self._has_conflict(slot_dt, slot_end, existing):
                         slots.append(slot_dt)
@@ -232,8 +241,8 @@ class GoogleCalendarService:
             if not ev_start_str or not ev_end_str:
                 continue
             try:
-                ev_start = datetime.fromisoformat(ev_start_str).replace(tzinfo=None)
-                ev_end = datetime.fromisoformat(ev_end_str).replace(tzinfo=None)
+                ev_start = datetime.fromisoformat(ev_start_str.replace("Z", "+00:00")).astimezone(SHOP_TIMEZONE)
+                ev_end = datetime.fromisoformat(ev_end_str.replace("Z", "+00:00")).astimezone(SHOP_TIMEZONE)
                 if start < ev_end and end > ev_start:
                     return True
             except (ValueError, TypeError):
@@ -243,7 +252,7 @@ class GoogleCalendarService:
     def _fallback_slots(self, num_days: int) -> List[datetime]:
         """Generate plausible 30-min slots when Calendar API is unreachable."""
         slots: List[datetime] = []
-        now = datetime.now()
+        now = datetime.now(tz=SHOP_TIMEZONE)
         # Start 2 hours from now, rounded up to next 30-min boundary
         candidate = now + timedelta(hours=2)
         minutes = candidate.minute
@@ -266,7 +275,7 @@ class GoogleCalendarService:
             # Jump to next morning if past business hours
             if candidate.hour >= 18:
                 candidate = datetime.combine(
-                    candidate.date() + timedelta(days=1), time(8, 0)
+                    candidate.date() + timedelta(days=1), time(8, 0), tzinfo=SHOP_TIMEZONE
                 )
 
         return slots
