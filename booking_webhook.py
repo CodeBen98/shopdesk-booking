@@ -275,7 +275,8 @@ def _safe_equal(a: str, b: str) -> bool:
 
 def _verify_webhook_auth(request: Request, raw_body: bytes) -> bool:
     if not BOOKING_WEBHOOK_SECRET:
-        return os.getenv("NODE_ENV", "development") != "production"
+        logger.error("CRITICAL: BOOKING_WEBHOOK_SECRET is not set — rejecting all webhook requests")
+        return False
 
     secret = BOOKING_WEBHOOK_SECRET
 
@@ -598,7 +599,7 @@ async def book_appointment(request: Request):
     except json.JSONDecodeError:
         return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
 
-    logger.info(f"Booking request body: {str(body)[:300]}")
+    logger.info(f"Booking request: shop_id={request.query_params.get('shop_id', '')[:40]} has_name={bool(body.get('name'))} has_phone={bool(body.get('phone'))} has_service={bool(body.get('issue') or body.get('service'))}")
     query_shop_id = request.query_params.get("shop_id", "")
     return await _handle_booking_request(body, query_shop_id)
 
