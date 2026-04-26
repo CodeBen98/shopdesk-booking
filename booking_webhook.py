@@ -60,7 +60,7 @@ async def get_shop_by_assistant(assistant_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id",
+                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id,industry",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -80,7 +80,7 @@ async def get_shop_by_id(shop_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id",
+                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id,industry",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -178,7 +178,8 @@ async def sync_customer_from_booking(
 
 async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
                               customer_phone: str, vehicle: str, service: str,
-                              appointment_time: str, calendar_link: str = "") -> None:
+                              appointment_time: str, calendar_link: str = "",
+                              details: str = "") -> None:
     """Send booking notification email to shop owner via Resend API."""
     if not to_email or not RESEND_API_KEY:
         logger.warning("Email not configured — skipping booking email")
@@ -198,8 +199,9 @@ async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
   <table style="width:100%;border-collapse:collapse;font-size:14px">
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280;width:120px">Customer</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827;font-weight:600">{customer_name}</td></tr>
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Phone</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{customer_phone}</td></tr>
-    <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Vehicle</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{vehicle}</td></tr>
+    {f'<tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Vehicle</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{vehicle}</td></tr>' if vehicle else ''}
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Service</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{service}</td></tr>
+    {f'<tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280">Details</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827">{details}</td></tr>' if details else ''}
     <tr><td style="padding:10px 0;color:#6b7280">Time</td><td style="padding:10px 0;color:#0F7695;font-weight:600">{appointment_time}</td></tr>
   </table>
   <div style="margin-top:24px">
@@ -263,11 +265,12 @@ class VapiBookingRequest(BaseModel):
     """Vapi tool call payload — parameters are nested under 'parameters'."""
     customer_name: str
     customer_phone: str
+    service: str
+    appointment_time: str
+    appointment_details: Optional[str] = ""
     vehicle_year: Optional[str] = ""
     vehicle_make: Optional[str] = ""
     vehicle_model: Optional[str] = ""
-    service: str
-    appointment_time: str
 
 def _safe_equal(a: str, b: str) -> bool:
     return hmac.compare_digest(a.encode('utf-8'), b.encode('utf-8'))
@@ -337,7 +340,7 @@ async def _resolve_shop(assistant_id: str, query_shop_id: str) -> Tuple[dict, st
     return {}, "Missing or unresolvable shop context."
 
 
-def _extract_payload(body: dict) -> Tuple[bool, str, dict, str, str, str, str, str, str, str]:
+def _extract_payload(body: dict) -> Tuple[bool, str, dict, str, str, str, str, str, str, str, str]:
     tool_calls = body.get("message", {}).get("toolCalls", [])
     is_vapi = bool(tool_calls)
 
@@ -357,6 +360,7 @@ def _extract_payload(body: dict) -> Tuple[bool, str, dict, str, str, str, str, s
             vehicle_str,
             args.get("service", ""),
             args.get("appointment_time", ""),
+            args.get("appointment_details", "") or args.get("details", ""),
             args.get("assistant_id", ""),
             body.get("message", {}).get("call", {}).get("id", ""),
         )
@@ -370,6 +374,7 @@ def _extract_payload(body: dict) -> Tuple[bool, str, dict, str, str, str, str, s
         body.get("vehicle", ""),
         body.get("issue", ""),
         body.get("appointment_time", ""),
+        body.get("appointment_details", "") or body.get("details", ""),
         body.get("assistant_id", ""),
         body.get("call_id", ""),
     )
@@ -385,6 +390,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
         vehicle_str,
         issue,
         appointment_time,
+        appointment_details,
         assistant_id,
         vapi_call_id,
     ) = _extract_payload(body)
@@ -399,6 +405,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
         return _error_response(is_vapi, tool_call_id, shop_error)
 
     shop_id_resolved = shop_row.get("id")
+    industry = shop_row.get("industry") or "auto_repair"
 
     cal_link = None
     try:
@@ -416,9 +423,11 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
             cal_link = await cal.book_appointment(
                 name=name,
                 phone=phone,
-                vehicle=vehicle_str or "Vehicle TBD",
+                vehicle=vehicle_str,
                 issue=issue,
                 slot_datetime=slot_dt,
+                details=appointment_details,
+                industry=industry,
             )
             if cal_link and cal_link.startswith("CALENDAR_FAILED:"):
                 cal_link = None
@@ -436,6 +445,8 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
             appointment_time=appointment_time,
             calendar_link=cal_link or "",
             vapi_call_id=vapi_call_id,
+            details=appointment_details,
+            industry=industry,
         )
     except Exception as e:
         logger.error(f"Supabase write error: {e}")
@@ -444,11 +455,13 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
         await send_confirmation(
             to_phone=phone,
             name=name,
-            vehicle=vehicle_str or "your vehicle",
+            vehicle=vehicle_str,
             slot=slot_dt or appointment_time,
             shop_name=shop_row.get("name") or "",
             shop_address=shop_row.get("address") or "",
             from_phone=shop_row.get("twilio_number") or "",
+            service=issue,
+            details=appointment_details,
         )
     except Exception as e:
         logger.error(f"SMS confirmation failed: {e}")
@@ -459,6 +472,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
             "phone": phone,
             "vehicle": vehicle_str,
             "issue": issue,
+            "details": appointment_details,
             "slot": appointment_time,
             "owner_phone": shop_row.get("owner_phone") or "",
             "shop_name": shop_row.get("name") or "",
@@ -475,10 +489,11 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
                 shop_name=shop_row.get("name") or "",
                 customer_name=name,
                 customer_phone=phone,
-                vehicle=vehicle_str or "Vehicle TBD",
+                vehicle=vehicle_str,
                 service=issue,
                 appointment_time=slot_dt.strftime("%A, %B %d at %I:%M %p") if slot_dt else appointment_time,
                 calendar_link=cal_link or "",
+                details=appointment_details,
             )
     except Exception as e:
         logger.error(f"Booking email failed: {e}")
@@ -511,7 +526,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
 async def save_booking_to_supabase(
     shop_id: str, customer_name: str, customer_phone: str,
     vehicle: str, service: str, slot_dt, appointment_time: str,
-    calendar_link: str = "", vapi_call_id: str = ""
+    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: str = "auto_repair"
 ) -> None:
     """Write booking to Supabase bookings table. Never raises — failures are logged only."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id:
@@ -554,7 +569,11 @@ async def save_booking_to_supabase(
             "appointment_at": appt_iso,
             "status": "scheduled",
             "sms_sent": False,
-            "notes": f"Calendar: {calendar_link}" if calendar_link else None,
+            "notes": "\n".join(part for part in [
+                f"Industry: {industry}" if industry else "",
+                f"Details: {details}" if details else "",
+                f"Calendar: {calendar_link}" if calendar_link else "",
+            ] if part) or None,
             "call_id": call_uuid,
             "sms_consent_given": True,
             "sms_consent_timestamp": consent_ts,

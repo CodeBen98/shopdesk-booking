@@ -157,11 +157,13 @@ class GoogleCalendarService:
         vehicle: str,
         issue: str,
         slot_datetime: Optional[datetime],
+        details: str = "",
+        industry: str = "auto_repair",
     ) -> str:
         """Create a calendar event; return the HTML event link."""
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
-            None, self._book_appointment_sync, name, phone, vehicle, issue, slot_datetime
+            None, self._book_appointment_sync, name, phone, vehicle, issue, slot_datetime, details, industry
         )
 
     # ── Sync implementations ──────────────────────────────────────────────────
@@ -287,6 +289,8 @@ class GoogleCalendarService:
         vehicle: str,
         issue: str,
         slot_datetime: Optional[datetime],
+        details: str = "",
+        industry: str = "auto_repair",
     ) -> str:
         """Create calendar event; return event URL or fallback confirmation string."""
         tz = ZoneInfo(TIMEZONE)
@@ -301,15 +305,22 @@ class GoogleCalendarService:
 
         slot_end = slot_datetime + timedelta(minutes=APPOINTMENT_DURATION_MINUTES)
 
+        industry_label = (industry or "auto_repair").replace("_", " ").title()
+        detail_lines = [
+            f"Customer: {name}",
+            f"Phone: {phone}",
+            f"Industry: {industry_label}",
+            f"Service: {issue}",
+        ]
+        if vehicle:
+            detail_lines.append(f"Vehicle: {vehicle}")
+        if details:
+            detail_lines.append(f"Details: {details}")
+
+        vehicle_suffix = f" ({vehicle})" if vehicle else ""
         event_body = {
-            "summary": f"ShopDesk: {issue} — {name} ({vehicle})",
-            "description": (
-                f"Customer: {name}\n"
-                f"Phone: {phone}\n"
-                f"Vehicle: {vehicle}\n"
-                f"Issue / Service: {issue}\n"
-                f"\nBooked by ShopDesk AI Receptionist"
-            ),
+            "summary": f"ShopDesk: {issue} — {name}{vehicle_suffix}",
+            "description": "\n".join(detail_lines) + "\n\nBooked by ShopDesk AI Receptionist",
             "start": {"dateTime": slot_datetime.isoformat(), "timeZone": TIMEZONE},
             "end": {"dateTime": slot_end.isoformat(), "timeZone": TIMEZONE},
             "reminders": {

@@ -110,6 +110,8 @@ async def send_confirmation(
     shop_name: str,
     shop_address: str,
     from_phone: str = "",
+    service: str = "",
+    details: str = "",
 ) -> str:
     """
     Send booking confirmation to the customer.
@@ -121,10 +123,11 @@ async def send_confirmation(
 
     slot_str = _fmt_slot(slot)
     from_display = _normalize_phone(from_phone) or "(unknown)"
+    detail_line = f"Vehicle: {vehicle}" if vehicle else f"Service: {service or 'Appointment'}"
     body = (
         f"Hi {name}! Your appointment at {shop_name} is confirmed.\n"
         f"Date: {slot_str}\n"
-        f"Vehicle: {vehicle}\n"
+        f"{detail_line}\n"
         f"Address: {shop_address}\n"
         f"Questions? Call us at {from_display}. See you soon!\n"
         f"Reply STOP to opt out."
@@ -154,16 +157,23 @@ async def send_owner_alert(booking_info: dict) -> str:
 
     name = booking_info.get("name", "Unknown")
     phone = booking_info.get("phone", "Unknown")
-    vehicle = booking_info.get("vehicle") or "Unknown vehicle"
+    vehicle = booking_info.get("vehicle") or ""
     issue = booking_info.get("issue", "Service")
+    details = booking_info.get("details") or ""
     slot_str = _fmt_slot(booking_info.get("slot"))
+    detail_lines = [
+        f"Customer: {name} | {phone}",
+        f"Service: {issue}",
+    ]
+    if vehicle:
+        detail_lines.append(f"Vehicle: {vehicle}")
+    if details:
+        detail_lines.append(f"Details: {details}")
+    detail_lines.append(f"Time: {slot_str}")
 
     body = (
         f"NEW APPOINTMENT — {shop_name}\n"
-        f"Customer: {name} | {phone}\n"
-        f"Vehicle: {vehicle}\n"
-        f"Service: {issue}\n"
-        f"Time: {slot_str}\n"
+        + "\n".join(detail_lines) + "\n"
         f"— ShopDesk AI\n"
         f"Reply STOP to opt out."
     )
