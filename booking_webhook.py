@@ -116,6 +116,8 @@ async def sync_customer_from_booking(
     customer_phone: str,
     vehicle: str,
     interaction_at: str,
+    industry: str = "auto_repair",
+    intake: dict | None = None,
 ) -> None:
     """Create or enrich a customer record from a successful booking."""
     normalized_phone = normalize_phone(customer_phone)
@@ -125,7 +127,7 @@ async def sync_customer_from_booking(
     try:
         async with httpx.AsyncClient() as client:
             lookup = await client.get(
-                f"{SUPABASE_URL}/rest/v1/customers?shop_id=eq.{shop_id}&phone=eq.{normalized_phone}&select=id,name,vehicle,last_visit,visit_count",
+                f"{SUPABASE_URL}/rest/v1/customers?shop_id=eq.{shop_id}&phone=eq.{normalized_phone}&select=id,name,vehicle,last_visit,visit_count,intake,industry",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=10,
             )
@@ -144,6 +146,8 @@ async def sync_customer_from_booking(
                         "name": customer_name or existing.get("name") or "Unknown Customer",
                         "phone": normalized_phone,
                         "vehicle": vehicle or existing.get("vehicle"),
+                        "industry": industry or existing.get("industry") or "auto_repair",
+                        "intake": {**(existing.get("intake") or {}), **(intake or {})},
                         "last_visit": next_last_visit,
                         "visit_count": max((existing.get("visit_count") or 0) + 1, 1),
                     },
@@ -163,6 +167,8 @@ async def sync_customer_from_booking(
                     "name": customer_name or "Unknown Customer",
                     "phone": normalized_phone,
                     "vehicle": vehicle or None,
+                    "industry": industry or "auto_repair",
+                    "intake": intake or {},
                     "last_visit": interaction_at,
                     "visit_count": 1,
                 },
@@ -560,12 +566,20 @@ async def save_booking_to_supabase(
         from datetime import timezone
         consent_ts = datetime.now(tz=timezone.utc).isoformat()
         normalized_phone = normalize_phone(customer_phone)
+        intake = {
+            "details": details or "",
+            "service": service or "",
+        }
+        if vehicle:
+            intake["vehicle"] = vehicle
         payload = {
             "shop_id": shop_id,
             "customer_name": customer_name,
             "customer_phone": normalized_phone,
             "vehicle": vehicle or None,
             "service": service or None,
+            "industry": industry or "auto_repair",
+            "intake": intake,
             "appointment_at": appt_iso,
             "status": "scheduled",
             "sms_sent": False,
@@ -600,6 +614,8 @@ async def save_booking_to_supabase(
                     customer_phone=normalized_phone,
                     vehicle=vehicle or "",
                     interaction_at=appt_iso,
+                    industry=industry or "auto_repair",
+                    intake=intake,
                 )
             else:
                 logger.error(f"Supabase booking insert failed: {resp.status_code} {resp.text[:200]}")
