@@ -116,7 +116,7 @@ async def sync_customer_from_booking(
     customer_phone: str,
     vehicle: str,
     interaction_at: str,
-    industry: str = "auto_repair",
+    industry: str | None = None,
     intake: dict | None = None,
 ) -> None:
     """Create or enrich a customer record from a successful booking."""
@@ -146,7 +146,7 @@ async def sync_customer_from_booking(
                         "name": customer_name or existing.get("name") or "Unknown Customer",
                         "phone": normalized_phone,
                         "vehicle": vehicle or existing.get("vehicle"),
-                        "industry": industry or existing.get("industry") or "auto_repair",
+                        "industry": industry or existing.get("industry"),
                         "intake": {**(existing.get("intake") or {}), **(intake or {})},
                         "last_visit": next_last_visit,
                         "visit_count": max((existing.get("visit_count") or 0) + 1, 1),
@@ -167,7 +167,7 @@ async def sync_customer_from_booking(
                     "name": customer_name or "Unknown Customer",
                     "phone": normalized_phone,
                     "vehicle": vehicle or None,
-                    "industry": industry or "auto_repair",
+                    "industry": industry or None,
                     "intake": intake or {},
                     "last_visit": interaction_at,
                     "visit_count": 1,
@@ -411,7 +411,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
         return _error_response(is_vapi, tool_call_id, shop_error)
 
     shop_id_resolved = shop_row.get("id")
-    industry = shop_row.get("industry") or "auto_repair"
+    industry = shop_row.get("industry") or ""
 
     cal_link = None
     try:
@@ -532,7 +532,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
 async def save_booking_to_supabase(
     shop_id: str, customer_name: str, customer_phone: str,
     vehicle: str, service: str, slot_dt, appointment_time: str,
-    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: str = "auto_repair"
+    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: str | None = None
 ) -> None:
     """Write booking to Supabase bookings table. Never raises — failures are logged only."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id:
@@ -578,7 +578,7 @@ async def save_booking_to_supabase(
             "customer_phone": normalized_phone,
             "vehicle": vehicle or None,
             "service": service or None,
-            "industry": industry or "auto_repair",
+            "industry": industry or None,
             "intake": intake,
             "appointment_at": appt_iso,
             "status": "scheduled",
@@ -614,7 +614,7 @@ async def save_booking_to_supabase(
                     customer_phone=normalized_phone,
                     vehicle=vehicle or "",
                     interaction_at=appt_iso,
-                    industry=industry or "auto_repair",
+                    industry=industry or None,
                     intake=intake,
                 )
             else:
