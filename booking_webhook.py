@@ -200,7 +200,7 @@ async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
   <span style="font-size:18px;font-weight:700;color:#f4f5f7">ShopDesk</span>
 </div>
 <div style="background:#fff;padding:32px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
-  <h2 style="font-size:20px;font-weight:700;color:#111827;margin:0 0 4px">New Appointment Booked</h2>
+  <h2 style="font-size:20px;font-weight:700;color:#111827;margin:0 0 4px">ShopDesk booked an appointment for you</h2>
   <p style="color:#6b7280;margin:0 0 24px;font-size:14px">{shop_name}</p>
   <table style="width:100%;border-collapse:collapse;font-size:14px">
     <tr><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#6b7280;width:120px">Customer</td><td style="padding:10px 0;border-bottom:1px solid #f3f4f6;color:#111827;font-weight:600">{customer_name}</td></tr>
@@ -220,7 +220,7 @@ async def send_booking_email(to_email: str, shop_name: str, customer_name: str,
         payload = {
             "from": f"ShopDesk <{FROM_EMAIL}>",
             "to": [to_email],
-            "subject": f"New Booking — {customer_name} — {service}",
+            "subject": f"ShopDesk booked: {customer_name} - {service}",
             "html": html,
         }
         async with httpx.AsyncClient() as client:
