@@ -116,8 +116,8 @@ async def sync_customer_from_booking(
     customer_phone: str,
     vehicle: str,
     interaction_at: str,
-    industry: str | None = None,
-    intake: dict | None = None,
+    industry: Optional[str] = None,
+    intake: Optional[dict] = None,
 ) -> None:
     """Create or enrich a customer record from a successful booking."""
     normalized_phone = normalize_phone(customer_phone)
@@ -532,7 +532,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
 async def save_booking_to_supabase(
     shop_id: str, customer_name: str, customer_phone: str,
     vehicle: str, service: str, slot_dt, appointment_time: str,
-    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: str | None = None
+    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: Optional[str] = None
 ) -> None:
     """Write booking to Supabase bookings table. Never raises — failures are logged only."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id:
