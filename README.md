@@ -4,7 +4,7 @@
 
 ### The backend that turns a phone conversation into a confirmed appointment
 
-When ShopDesk's AI receptionist agrees on a time with a caller, it calls this service. In about a second, the appointment is on the business's calendar, saved to the database, and confirmed to both the customer and the owner.
+When ShopDesk's AI receptionist agrees on a time with a caller, it calls this service. Within seconds, the appointment is on the business's calendar, saved to the database, and confirmed to both the customer and the owner.
 
 ![Python](https://img.shields.io/badge/Python_3.9+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
@@ -53,7 +53,7 @@ sequenceDiagram
     B->>B: Parse "Thursday at 10am" → datetime (Eastern)
     B->>G: Create event on the shop's calendar
     B->>S: Save booking, upsert customer
-    B->>T: SMS to caller + owner, email confirmation
+    B->>T: SMS to caller and owner, email to owner
     B-->>V: "You're booked for Thursday at 10:00 AM."
     V-->>C: Reads the confirmation back
 ```
@@ -67,7 +67,7 @@ sequenceDiagram
 | **No PII in logs** | Logs record whether a name or phone was provided, never the values. |
 | **Async I/O** | FastAPI with `httpx`; the synchronous Google client runs in an executor so one slow API call doesn't block other bookings. |
 | **Natural-language times** | Callers say things like "Thursday at noon" or "October 14 at 3pm"; the parser resolves these to concrete appointment times (Eastern time). |
-| **Narrow OAuth scope** | Calendar access uses `calendar.events` only, the minimum needed to create bookings. |
+| **Narrow OAuth scope** | Calendar access uses only the `calendar.events` scope, the narrowest one that can check availability and create bookings. |
 
 ## API
 
@@ -107,7 +107,7 @@ Then open http://localhost:8000/health or http://localhost:8000/docs.
 python -m pytest -q
 ```
 
-The suite covers the health check; webhook authentication (no secret configured, wrong token, valid token, valid and tampered HMAC signatures); phone-number normalisation; and natural-language time parsing. GitHub Actions runs it on Python 3.9 and 3.12 for every push and pull request.
+The suite covers the health check; webhook authentication (no secret configured, wrong token, valid token, valid and tampered HMAC signatures); phone-number normalization; and natural-language time parsing. GitHub Actions runs it on Python 3.9 and 3.12 for every push to `main` and every pull request.
 
 ## Code map
 
