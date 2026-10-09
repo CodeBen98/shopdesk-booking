@@ -6,6 +6,7 @@
 
 When ShopDesk's AI receptionist agrees on a time with a caller, it calls this service. Within seconds, the appointment is on the business's calendar, saved to the database, and confirmed to both the customer and the owner.
 
+[![CI](https://github.com/CodeBen98/shopdesk-booking/actions/workflows/ci.yml/badge.svg)](https://github.com/CodeBen98/shopdesk-booking/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python_3.9+-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![Google Calendar](https://img.shields.io/badge/Google_Calendar-4285F4?logo=googlecalendar&logoColor=white)
