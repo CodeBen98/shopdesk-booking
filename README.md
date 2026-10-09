@@ -33,7 +33,7 @@ When ShopDesk's AI receptionist agrees on a time with a caller, it calls this se
 
 ## Where it fits
 
-ShopDesk gives local service businesses an AI phone receptionist. The voice agent (Vapi) handles the conversation; **this service handles the action**. It's called as a tool in the middle of a live call, so it has to be fast, correct, and safe for many businesses at once.
+ShopDesk gives local businesses an AI phone receptionist. The voice agent (Vapi) handles the conversation; **this service handles the action**. It's called as a tool in the middle of a live call, so it has to be fast, correct, and safe for many businesses at once.
 
 ## What happens on a booking
 
