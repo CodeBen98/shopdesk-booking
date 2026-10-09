@@ -66,7 +66,7 @@ sequenceDiagram
 | **Strict multi-tenancy, no fallbacks** | Every action is scoped to the shop that owns the calling assistant. If shop-specific data (phone number, owner contact, calendar) is missing, the step is skipped and logged instead of reaching the wrong business. |
 | **No PII in logs** | Logs record whether a name or phone was provided, never the values. |
 | **Async I/O** | FastAPI with `httpx`; the synchronous Google client runs in an executor so one slow API call doesn't block other bookings. |
-| **Natural-language times** | Callers say "Thursday at noon" or "tomorrow 3pm"; the parser resolves these to concrete times in the shop's timezone. |
+| **Natural-language times** | Callers say things like "Thursday at noon" or "October 14 at 3pm"; the parser resolves these to concrete appointment times (Eastern time). |
 | **Narrow OAuth scope** | Calendar access uses `calendar.events` only, the minimum needed to create bookings. |
 
 ## API
