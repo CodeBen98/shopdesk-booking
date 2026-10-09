@@ -1,6 +1,14 @@
+# Secrets: never commit. Configure them as environment variables instead.
 .env
-__pycache__/
-*.pyc
-.DS_Store
+.env.*
+!.env.example
 credentials.json
 token.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+.DS_Store
