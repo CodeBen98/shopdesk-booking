@@ -657,7 +657,7 @@ async def vapi_book_appointment(request: Request):
 # /slots removed — single-tenant legacy endpoint with no shop context.
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
     return {"status": "ok", "service": "shopdesk-booking"}
 

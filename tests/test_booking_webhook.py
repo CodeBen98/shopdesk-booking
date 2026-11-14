@@ -73,3 +73,12 @@ def test_parses_relative_day_and_time():
     assert dt is not None
     assert dt.weekday() == 3 and dt.hour == 10 and dt.minute == 0
     assert dt > datetime.now(tz=ZoneInfo("America/New_York"))
+
+
+def test_health_allows_get_and_head():
+    from fastapi.testclient import TestClient
+    import booking_webhook
+
+    client = TestClient(booking_webhook.app)
+    assert client.get("/health").status_code == 200
+    assert client.head("/health").status_code == 200
