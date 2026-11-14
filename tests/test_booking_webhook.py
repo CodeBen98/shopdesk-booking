@@ -76,9 +76,20 @@ def test_parses_relative_day_and_time():
 
 
 def test_health_allows_get_and_head():
-    from fastapi.testclient import TestClient
-    import booking_webhook
-
-    client = TestClient(booking_webhook.app)
     assert client.get("/health").status_code == 200
     assert client.head("/health").status_code == 200
+
+
+@pytest.mark.parametrize("db,expected_code", [
+    ("ok", 200),
+    ("not_configured", 200),
+    ("unreachable", 503),
+    ("http_500", 503),
+])
+def test_health_reports_database(monkeypatch, db, expected_code):
+    async def fake_check():
+        return db
+    monkeypatch.setattr(bw, "_check_database", fake_check)
+    r = client.get("/health")
+    assert r.status_code == expected_code
+    assert r.json()["database"] == db

@@ -657,9 +657,35 @@ async def vapi_book_appointment(request: Request):
 # /slots removed — single-tenant legacy endpoint with no shop context.
 
 
+async def _check_database() -> str:
+    """Run a tiny Supabase query. Returns "ok", "not_configured", or an error label.
+
+    Also keeps the free-tier Supabase project from auto-pausing: the uptime
+    monitor hits /health every few minutes, and this counts as DB activity.
+    """
+    if not SUPABASE_URL or not SUPABASE_SERVICE_KEY:
+        return "not_configured"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/shops?select=id&limit=1",
+                headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
+                timeout=5,
+            )
+        return "ok" if resp.status_code == 200 else f"http_{resp.status_code}"
+    except Exception as e:
+        logger.error(f"health: database check failed: {e}")
+        return "unreachable"
+
+
 @app.api_route("/health", methods=["GET", "HEAD"])
 async def health():
-    return {"status": "ok", "service": "shopdesk-booking"}
+    db = await _check_database()
+    status_code = 200 if db in ("ok", "not_configured") else 503
+    return JSONResponse(
+        {"status": "ok" if status_code == 200 else "degraded", "service": "shopdesk-booking", "database": db},
+        status_code=status_code,
+    )
 
 
 def _parse_appointment_time(time_str: str) -> Optional[datetime]:
