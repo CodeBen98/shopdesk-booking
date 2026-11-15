@@ -93,3 +93,64 @@ def test_health_reports_database(monkeypatch, db, expected_code):
     r = client.get("/health")
     assert r.status_code == expected_code
     assert r.json()["database"] == db
+
+
+def test_parses_in_shop_timezone():
+    la = bw._parse_appointment_time("March 3, 2031 at 10am", "America/Los_Angeles")
+    assert la.tzinfo is not None
+    assert (la.hour, la.utcoffset().total_seconds()) == (10, -8 * 3600)
+    ny = bw._parse_appointment_time("March 3, 2031 at 10am")
+    assert ny.utcoffset().total_seconds() == -5 * 3600
+    # Same wall-clock time, 3 hours apart in real time.
+    assert (la - ny).total_seconds() == 3 * 3600
+
+
+def test_relative_day_uses_shop_timezone():
+    dt = bw._parse_appointment_time("Friday at 2:30 pm", "America/Los_Angeles")
+    assert str(dt.tzinfo) == "America/Los_Angeles"
+    assert (dt.weekday(), dt.hour, dt.minute) == (4, 14, 30)
+
+
+def test_month_day_without_year_rolls_into_next_year(monkeypatch):
+    class FakeDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 12, 20, 9, 0, tzinfo=tz)
+    monkeypatch.setattr(bw, "datetime", FakeDatetime)
+    dt = bw._parse_appointment_time("January 5 at 9am", "America/Los_Angeles")
+    assert (dt.year, dt.month, dt.day) == (2027, 1, 5)
+
+
+@pytest.mark.parametrize("tz,expected", [
+    ("America/Los_Angeles", "America/Los_Angeles"),
+    (None, "America/New_York"),
+    ("Mars/Olympus", "America/New_York"),
+])
+def test_shop_timezone_fallback(tz, expected):
+    assert bw.shop_timezone({"timezone": tz}) == expected
+
+
+def test_booking_is_saved_in_shop_timezone(monkeypatch):
+    import asyncio
+    saved = {}
+
+    async def fake_resolve(assistant_id, shop_id):
+        return {"id": "shop-1", "name": "LA Auto", "timezone": "America/Los_Angeles"}, ""
+
+    async def fake_save(**kwargs):
+        saved.update(kwargs)
+
+    async def noop(*a, **k):
+        return ""
+
+    monkeypatch.setattr(bw, "_resolve_shop", fake_resolve)
+    monkeypatch.setattr(bw, "save_booking_to_supabase", fake_save)
+    monkeypatch.setattr(bw, "send_confirmation", noop)
+    monkeypatch.setattr(bw, "send_owner_alert", noop)
+
+    body = {"name": "Ana", "phone": "3105551234", "issue": "Oil change",
+            "appointment_time": "March 3, 2031 at 10am"}
+    resp = asyncio.run(bw._handle_booking_request(body, "shop-1"))
+    assert resp.status_code == 200
+    assert saved["timezone"] == "America/Los_Angeles"
+    assert saved["slot_dt"].isoformat() == "2031-03-03T10:00:00-08:00"

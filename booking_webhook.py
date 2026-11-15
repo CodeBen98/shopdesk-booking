@@ -60,7 +60,7 @@ async def get_shop_by_assistant(assistant_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id,industry",
+                f"{SUPABASE_URL}/rest/v1/shops?vapi_agent_id=eq.{assistant_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id,industry,timezone",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -80,7 +80,7 @@ async def get_shop_by_id(shop_id: str) -> dict:
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id,industry",
+                f"{SUPABASE_URL}/rest/v1/shops?id=eq.{shop_id}&select=id,name,address,email,hours,owner_phone,twilio_number,google_refresh_token,google_calendar_id,industry,timezone",
                 headers={"apikey": SUPABASE_SERVICE_KEY, "Authorization": f"Bearer {SUPABASE_SERVICE_KEY}"},
                 timeout=5,
             )
@@ -108,6 +108,18 @@ def normalize_phone(phone: str) -> str:
     if raw.startswith('+'):
         return raw
     return digits or raw
+
+
+SHOP_TIMEZONES = {
+    "America/Los_Angeles", "America/Denver", "America/Phoenix", "America/Chicago",
+    "America/New_York", "America/Anchorage", "Pacific/Honolulu",
+}
+DEFAULT_TIMEZONE = "America/New_York"  # shops created before per-shop time zones
+
+
+def shop_timezone(shop_row: dict) -> str:
+    tz = (shop_row or {}).get("timezone")
+    return tz if tz in SHOP_TIMEZONES else DEFAULT_TIMEZONE
 
 
 async def sync_customer_from_booking(
@@ -404,11 +416,12 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
     if not name or not phone or not issue or not appointment_time:
         return _error_response(is_vapi, tool_call_id, "Missing required booking fields.")
 
-    slot_dt = _parse_appointment_time(appointment_time)
-
     shop_row, shop_error = await _resolve_shop(assistant_id, query_shop_id)
     if not shop_row:
         return _error_response(is_vapi, tool_call_id, shop_error)
+
+    tz_name = shop_timezone(shop_row)
+    slot_dt = _parse_appointment_time(appointment_time, tz_name)
 
     shop_id_resolved = shop_row.get("id")
     industry = shop_row.get("industry") or ""
@@ -425,6 +438,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
                 client_secret=os.getenv("GOOGLE_CLIENT_SECRET", ""),
                 shop_hours=shop_row.get("hours"),
                 calendar_id=shop_calendar_id,
+                timezone=tz_name,
             )
             cal_link = await cal.book_appointment(
                 name=name,
@@ -453,6 +467,7 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
             vapi_call_id=vapi_call_id,
             details=appointment_details,
             industry=industry,
+            timezone=tz_name,
         )
     except Exception as e:
         logger.error(f"Supabase write error: {e}")
@@ -532,7 +547,8 @@ async def _handle_booking_request(body: dict, query_shop_id: str = ""):
 async def save_booking_to_supabase(
     shop_id: str, customer_name: str, customer_phone: str,
     vehicle: str, service: str, slot_dt, appointment_time: str,
-    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: Optional[str] = None
+    calendar_link: str = "", vapi_call_id: str = "", details: str = "", industry: Optional[str] = None,
+    timezone: str = DEFAULT_TIMEZONE,
 ) -> None:
     """Write booking to Supabase bookings table. Never raises — failures are logged only."""
     if not SUPABASE_URL or not SUPABASE_SERVICE_KEY or not shop_id:
@@ -542,9 +558,8 @@ async def save_booking_to_supabase(
         # Ensure timezone-aware ISO format for correct storage
         if slot_dt:
             from zoneinfo import ZoneInfo
-            EASTERN = ZoneInfo("America/New_York")
             if slot_dt.tzinfo is None:
-                slot_dt = slot_dt.replace(tzinfo=EASTERN)
+                slot_dt = slot_dt.replace(tzinfo=ZoneInfo(timezone))
             appt_iso = slot_dt.isoformat()
         else:
             appt_iso = appointment_time
@@ -688,19 +703,20 @@ async def health():
     )
 
 
-def _parse_appointment_time(time_str: str) -> Optional[datetime]:
-    """Parse a free-form appointment time string into a datetime (Eastern time)."""
+def _parse_appointment_time(time_str: str, tz_name: str = DEFAULT_TIMEZONE) -> Optional[datetime]:
+    """Parse a free-form appointment time into a timezone-aware datetime in the shop's zone."""
     import re
+    from datetime import timedelta
     from zoneinfo import ZoneInfo
 
-    EASTERN = ZoneInfo("America/New_York")
+    shop_tz = ZoneInfo(tz_name)
 
     # Normalize: collapse spaces, handle am/pm variations
     s = time_str.strip()
     s = re.sub(r'\s+', ' ', s)
     s = re.sub(r'(\d)(am|pm)', r'\1 \2', s, flags=re.IGNORECASE)  # "10am" -> "10 am"
 
-    now = datetime.now(tz=EASTERN)
+    now = datetime.now(tz=shop_tz)
     current_year = now.year
 
     # Handle day-of-week only formats like "Thursday at 10am" or "Thursday at noon"
@@ -722,7 +738,7 @@ def _parse_appointment_time(time_str: str) -> Optional[datetime]:
         days_ahead = (target_weekday - today_weekday) % 7
         if days_ahead == 0:
             days_ahead = 7  # next week if today
-        target_date = now + __import__('datetime').timedelta(days=days_ahead)
+        target_date = now + timedelta(days=days_ahead)
         # Try to parse the time part
         for time_fmt in ["%I:%M %p", "%I %p", "%H:%M"]:
             try:
@@ -753,9 +769,12 @@ def _parse_appointment_time(time_str: str) -> Optional[datetime]:
         for fmt in formats:
             try:
                 dt = datetime.strptime(candidate.strip(), fmt)
-                if dt.year == 1900:
+                if "%Y" not in fmt:
                     dt = dt.replace(year=current_year)
-                return dt
+                    # "January 5" said in December means next January.
+                    if dt.replace(tzinfo=shop_tz) < now - timedelta(days=1):
+                        dt = dt.replace(year=current_year + 1)
+                return dt.replace(tzinfo=shop_tz)
             except ValueError:
                 continue
 
